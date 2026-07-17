@@ -2,8 +2,11 @@ import axios from 'axios';
 import https from 'https';
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 10, scheduling: 'fifo' });
-const jupApiUrl = process.env.JUPITER_LOCAL_URL || process.env.JUPITER_URL || 'https://public.jupiterapi.com';
-console.log(`🪐 [QuoteService] Roteador Jupiter configurado para: ${jupApiUrl}`);
+const isProduction = process.env.NODE_ENV === 'production';
+const jupApiUrl = !isProduction
+    ? (process.env.JUPITER_LOCAL_URL || 'http://localhost:8080')
+    : (process.env.JUPITER_URL || 'https://public.jupiterapi.com');
+console.log(`🪐 [QuoteService] Roteador Jupiter configurado para: ${jupApiUrl} (Modo: ${isProduction ? 'Produção' : 'Desenvolvimento'})`);
 const jupApi = axios.create({ baseURL: jupApiUrl, httpsAgent, timeout: 3000 });
 const raptorApi = axios.create({ baseURL: 'https://raptor-beta.solanatracker.io', httpsAgent, timeout: 2000 });
 
