@@ -153,13 +153,20 @@ async function reloadState() {
                 });
             }
         }
-        activeTargetPools = Array.from(resolvedPoolsMap.values());
+        const newActiveTargetPools = Array.from(resolvedPoolsMap.values());
+        const oldKeys = activeTargetPools.map(p => p.address.toBase58()).sort().join(',');
+        const newKeys = newActiveTargetPools.map(p => p.address.toBase58()).sort().join(',');
 
-        // Se o modo for WSS, atualiza as inscrições
-        if (connectionMode === 'wss' && wssConnectionInstance) {
-            await resubscribePoolAccounts().catch(err => {
-                console.error('Erro ao re-inscrever em pools:', err);
-            });
+        if (oldKeys !== newKeys) {
+            activeTargetPools = newActiveTargetPools;
+            // Se o modo for WSS, atualiza as inscrições
+            if (connectionMode === 'wss' && wssConnectionInstance) {
+                await resubscribePoolAccounts().catch(err => {
+                    console.error('Erro ao re-inscrever em pools:', err);
+                });
+            }
+        } else {
+            activeTargetPools = newActiveTargetPools;
         }
     } else {
         activeTargetPools = [];
@@ -302,6 +309,7 @@ async function runArbitrageCycle() {
         }));
     } finally {
         isAnalyzing = false;
+        process.stdout.write(` | Levou: ${Date.now() - now}ms`);
     }
 }
 
@@ -326,6 +334,7 @@ async function triggerTargetedArbitrageCycle(mintA: string, mintB: string) {
         }));
     } finally {
         isAnalyzing = false;
+        process.stdout.write(` | Levou: ${Date.now() - now}ms`);
     }
 }
 
@@ -368,6 +377,7 @@ async function pollTargetPoolAccounts() {
 
             isAnalyzing = true;
             try {
+                process.stdout.write(`\r⚡ Mudança detectada via polling. Analisando ${cachedStrategies.length} estratégia(s)... | ${new Date().toLocaleTimeString()} `);
                 await Promise.all(cachedStrategies.map(async (strategy) => {
                     const tokenA = strategy.tokenAMint || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
                     const tokenB = strategy.tokenBMint;
@@ -388,6 +398,7 @@ async function pollTargetPoolAccounts() {
                 }));
             } finally {
                 isAnalyzing = false;
+                process.stdout.write(` | Levou: ${Date.now() - now}ms`);
             }
         }
     } catch (error) {
