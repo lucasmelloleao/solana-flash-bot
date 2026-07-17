@@ -26,6 +26,7 @@ let latestJitoTipLamports = 25000;
 let cachedStrategies: any[] = [];
 let cachedSolPriceUsdc = 150;
 let userIdCache: string | null = null;
+const temporaryAttempts = new Map<string, number>();
 
 let walletCache: Map<string, { keypair: Keypair, usdcAta: PublicKey, balance: number }> = new Map();
 
@@ -100,6 +101,17 @@ async function runArbitrageCycle() {
         process.stdout.write(`\r⚡ Slot atualizado. Analisando ${cachedStrategies.length} estratégia(s)... | Última checagem: ${new Date().toLocaleTimeString()} `);
         await Promise.all(cachedStrategies.map(async (strategy) => {
             try {
+                if (strategy.temporary) {
+                    const attempts = temporaryAttempts.get(strategy._id.toString()) || 0;
+                    if (attempts >= 10) {
+                        await DatabaseService.deleteStrategy(strategy._id.toString());
+                        temporaryAttempts.delete(strategy._id.toString());
+                        cachedStrategies = cachedStrategies.filter(s => s._id.toString() !== strategy._id.toString());
+                        return;
+                    }
+                    temporaryAttempts.set(strategy._id.toString(), attempts + 1);
+                }
+
                 const tokenBorrowed = strategy.tokenAMint || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Defaults to USDC
                 const lendingProvider = strategy.lendingProvider || 'solend';
 
@@ -190,9 +202,18 @@ async function runArbitrageCycle() {
                     }
                 }
             } catch (err: any) {
+                const status = err.response?.status || err.status;
+                
+                if (strategy.temporary && (status === 400 || status === 429)) {
+                    logger.warn(`Erro ${status} detectado na estratégia temporária ${strategy.name}. A estratégia será eliminada prematuramente.`);
+                    await DatabaseService.deleteStrategy(strategy._id.toString());
+                    temporaryAttempts.delete(strategy._id.toString());
+                    cachedStrategies = cachedStrategies.filter(s => s._id.toString() !== strategy._id.toString());
+                }
+
                 if (err.message && err.message.includes('Solend Pool configuration not found')) {
                     logger.error(`Erro de Configuração de Pool: ${err.message}`);
-                } else if (err.response?.status === 429) {
+                } else if (status === 429) {
                     globalPenaltyMs = Date.now() + 15000;
                     logger.warn('Rate Limit 429 detectado. Penalidade de 15s aplicada.');
                 } else {

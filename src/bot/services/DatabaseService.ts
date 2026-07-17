@@ -31,6 +31,15 @@ export class DatabaseService {
         }
     }
 
+    static async deleteStrategy(id: string) {
+        try {
+            await FlashLoanStrategy.findByIdAndDelete(id);
+            console.log(`🗑️ Estratégia temporária deletada: ${id}`);
+        } catch (error) {
+            console.error(`Erro ao deletar estratégia ${id}:`, error);
+        }
+    }
+
     static async getWalletForUser(userId: string): Promise<Keypair | null> {
         try {
             const walletDoc = await Wallet.findOne({ userId });
