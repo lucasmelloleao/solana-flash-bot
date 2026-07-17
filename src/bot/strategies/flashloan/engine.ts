@@ -1,14 +1,17 @@
 import { Keypair, PublicKey } from '@solana/web3.js';
-import { DatabaseService } from './services/DatabaseService';
-import { QuoteService } from './services/QuoteService';
-import { SolanaService } from './services/SolanaService';
-import { TransactionBuilder } from './services/TransactionBuilder';
-import { getSolendPoolConfig } from './config/solend-pools';
-import { getKaminoPoolConfig } from './config/kamino-pools';
-import FlashLoanTrade from '../models/FlashLoanTrade';
+import { DatabaseService } from '../../services/DatabaseService';
+import { QuoteService } from '../../services/QuoteService';
+import { SolanaService } from '../../services/SolanaService';
+import { TransactionBuilder } from '../../services/TransactionBuilder';
+import { borrowFlashLoanFromSolend, repayFlashLoanToSolend } from './solend-helper';
+import { borrowFlashLoanFromKamino, repayFlashLoanToKamino } from './kamino-helper';
+import { getSolendPoolConfig } from '../../config/solend-pools';
+import { getKaminoPoolConfig } from '../../config/kamino-pools';
+import FlashLoanTrade from '../../../models/FlashLoanTrade';
+const SystemStatus = require('../../../models/SystemStatus').default || require('../../../models/SystemStatus');
 
 // Logger Mock
-const logger = {
+let logger = {
     info: (obj: any, msg?: string) => console.log(`[INFO] ${msg || ''}`, typeof obj === 'string' ? obj : JSON.stringify(obj)),
     warn: (obj: any, msg?: string) => console.warn(`[WARN] ${msg || ''}`, typeof obj === 'string' ? obj : JSON.stringify(obj)),
     error: (obj: any, msg?: string) => console.error(`[ERROR] ${msg || ''}`, typeof obj === 'string' ? obj : JSON.stringify(obj)),
