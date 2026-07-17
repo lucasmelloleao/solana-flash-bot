@@ -9,8 +9,8 @@ import {
     AddressLookupTableAccount
 } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { createFlashLoanBorrowInstruction, createFlashLoanRepayInstruction } from '../solend-helper';
-import { createKaminoFlashLoanBorrowInstruction, createKaminoFlashLoanRepayInstruction } from '../kamino-helper';
+import { createFlashLoanBorrowInstruction, createFlashLoanRepayInstruction } from '../strategies/flashloan/solend-helper';
+import { createKaminoFlashLoanBorrowInstruction, createKaminoFlashLoanRepayInstruction } from '../strategies/flashloan/kamino-helper';
 import { SolanaService } from './SolanaService';
 
 const JITO_TIP_ACCOUNTS = [
