@@ -116,8 +116,6 @@ export class TransactionBuilder {
             const txBytes = serialized.byteLength;
             console.log(`[DEBUG] Tamanho da Transação compilada: ${txBytes} bytes`);
         } catch (serializeError: any) {
-            console.log(`[DEBUG ERROR] Erro na compilação da transação:`, serializeError.message);
-            console.log(serializeError.stack);
             
             if (serializeError.message && (serializeError.message.includes('encoding overruns Uint8Array') || serializeError.message.includes('too many account keys') || serializeError.message.includes('Account index overflow'))) {
                 console.log(`\n🚨 FATAL: TRANSAÇÃO GIGANTE (> 1232 bytes)`);
