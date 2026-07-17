@@ -44,8 +44,8 @@ export class QuoteService {
 
     static async getSwapInstructions(quoteResponse: any, userPublicKeyBase58: string, useRaptor: boolean) {
         const swapApi = useRaptor ? raptorApi : jupApi;
-        const res = await raptorApi.post('/swap-instructions', {
-            //   const res = await swapApi.post('/swap-instructions', {
+        //const res = await raptorApi.post('/swap-instructions', {
+        const res = await swapApi.post('/swap-instructions', {
             quoteResponse,
             userPublicKey: userPublicKeyBase58,
             wrapAndUnwrapSol: false,
