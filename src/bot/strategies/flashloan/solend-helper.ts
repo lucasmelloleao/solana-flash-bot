@@ -2,7 +2,7 @@ import { PublicKey, TransactionInstruction, SYSVAR_INSTRUCTIONS_PUBKEY } from '@
 import BN from 'bn.js';
 // @ts-ignore
 import BufferLayout from 'buffer-layout';
-import { SolendPoolConfig } from './config/solend-pools';
+import { SolendPoolConfig } from '../../config/solend-pools';
 
 // Constantes do Token SPL
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');

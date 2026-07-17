@@ -1,7 +1,7 @@
 import { PublicKey, TransactionInstruction, SYSVAR_INSTRUCTIONS_PUBKEY } from '@solana/web3.js';
 import BN from 'bn.js';
 import { flashBorrowReserveLiquidity, flashRepayReserveLiquidity } from '@kamino-finance/klend-sdk';
-import { KaminoPoolConfig } from './config/kamino-pools';
+import { KaminoPoolConfig } from '../../config/kamino-pools';
 
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const KAMINO_PROGRAM_ID = new PublicKey('KLend2g3cPENfacJ9vnAtxXFQr1djYSU33M2hQ7D2A8');

@@ -97,7 +97,7 @@ export class TransactionBuilder {
 
         const allIxs = [...preRepayIxs, repayIx, jitoTipIx];
 
-        const connection = await SolanaService.getConnection();
+        const connection = await SolanaService.getWriteConnection();
         const { blockhash } = await connection.getLatestBlockhash('confirmed');
 
         let serialized;
