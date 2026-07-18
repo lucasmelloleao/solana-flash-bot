@@ -1,11 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import dns from 'dns';
-if (process.env.NODE_ENV !== 'production') {
-    dns.setServers(['1.1.1.1', '8.8.8.8']);
-}
-
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { DatabaseService } from '../../services/DatabaseService';
 import { QuoteService } from '../../services/QuoteService';
@@ -264,11 +259,39 @@ async function runSingleStrategyArbitrage(strategy: any) {
                         if (result.jitoBundleId) {
                             tradeLog.jitoBundleId = result.jitoBundleId;
                             await tradeLog.save();
+                            logger.info({ txid: result.txid, bundleId: result.jitoBundleId, expectedProfit: (profit / 1e6).toFixed(4) }, '🚀 TRANSAÇÃO ENVIADA COM SUCESSO (Aguardando confirmação...)');
+                            
+                            // Checagem assíncrona de confirmação de lucro
+                            SolanaService.getConnection().then(async conn => {
+                                try {
+                                    const latestBlockhash = await conn.getLatestBlockhash('confirmed');
+                                    const confirmation = await conn.confirmTransaction({
+                                        signature: result.txid,
+                                        blockhash: latestBlockhash.blockhash,
+                                        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+                                    }, 'confirmed');
+                                    
+                                    if (confirmation.value.err) {
+                                        logger.error({ txid: result.txid, err: confirmation.value.err }, '❌ TRANSAÇÃO FALHOU NA REDE (Revertida)');
+                                        tradeLog.status = 'failed';
+                                        tradeLog.errorMessage = JSON.stringify(confirmation.value.err);
+                                        await tradeLog.save();
+                                    } else {
+                                        logger.info({ txid: result.txid, profitUsdc: (profit / 1e6).toFixed(4) }, '✅ TRANSAÇÃO CONFIRMADA COM SUCESSO! LUCRO OBTIDO!');
+                                        tradeLog.status = 'completed';
+                                        await tradeLog.save();
+                                    }
+                                } catch (e: any) {
+                                    logger.warn({ txid: result.txid, error: e.message }, '⚠️ Timeout ou erro ao checar a confirmação da transação na rede.');
+                                }
+                            });
+
                         } else {
                             tradeLog.status = 'failed';
                             tradeLog.errorMessage = 'Jito rejeitou o bundle';
                             await tradeLog.save();
                             circuitBreaker.recordFailure();
+                            logger.error({ txid: result.txid }, '❌ JITO REJEITOU O BUNDLE (Falha ao enviar)');
                         }
                     }
                 } catch (txError: any) {
