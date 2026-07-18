@@ -120,8 +120,8 @@ export class SolanaService {
             const payload = { jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[transactionBase58]] };
             const res = await axios.post(blockEngineUrl, payload, { headers: { 'Content-Type': 'application/json' }, httpsAgent, timeout: 3000 });
             return res.data;
-        } catch (err) {
-            return null;
+        } catch (err: any) {
+            return { error: err.response?.data || err.message };
         }
     }
 

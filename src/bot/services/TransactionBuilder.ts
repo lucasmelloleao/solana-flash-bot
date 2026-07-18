@@ -48,7 +48,7 @@ export class TransactionBuilder {
         cachedUserAta: PublicKey | null,
         poolConfig: any,
         lendingProvider: 'solend' | 'kamino' | 'none' = 'none'
-    ): Promise<{ txid: string, jitoBundleId: string | null } | null> {
+    ): Promise<{ txid: string, jitoBundleId: string | null, jitoError?: any, fullJitoResponse?: any } | null> {
 
         const swapA = {
             setupInstructions: (instructionsARes.setupInstructions || []).map(deserializeInstruction),
@@ -151,7 +151,9 @@ export class TransactionBuilder {
         const jitoResponse = await SolanaService.sendJitoBundle(transactionBase58);
         return {
             txid,
-            jitoBundleId: (jitoResponse && jitoResponse.result) ? jitoResponse.result : null
+            jitoBundleId: (jitoResponse && jitoResponse.result) ? jitoResponse.result : null,
+            jitoError: (jitoResponse && jitoResponse.error) ? jitoResponse.error : null,
+            fullJitoResponse: jitoResponse
         };
     }
 }

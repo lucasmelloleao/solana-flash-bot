@@ -288,10 +288,10 @@ async function runSingleStrategyArbitrage(strategy: any) {
 
                         } else {
                             tradeLog.status = 'failed';
-                            tradeLog.errorMessage = 'Jito rejeitou o bundle';
+                            tradeLog.errorMessage = result.jitoError ? JSON.stringify(result.jitoError) : (result.fullJitoResponse ? JSON.stringify(result.fullJitoResponse) : 'Jito rejeitou o bundle sem resposta');
                             await tradeLog.save();
                             circuitBreaker.recordFailure();
-                            logger.error({ txid: result.txid }, '❌ JITO REJEITOU O BUNDLE (Falha ao enviar)');
+                            logger.error({ txid: result.txid, jitoResponse: result.fullJitoResponse }, '❌ JITO REJEITOU O BUNDLE (Falha ao enviar)');
                         }
                     }
                 } catch (txError: any) {
@@ -492,6 +492,38 @@ async function restartExecutionEngine() {
     }
 }
 
+async function checkPendingTransactions() {
+    try {
+        const pendingTrades = await FlashLoanTrade.find({ status: 'pending', txid: { $exists: true, $ne: null } });
+        if (pendingTrades.length === 0) return;
+
+        const conn = await SolanaService.getConnection();
+        
+        for (const trade of pendingTrades) {
+            try {
+                const signatureStatus = await conn.getSignatureStatus(trade.txid);
+                
+                if (signatureStatus && signatureStatus.value) {
+                    if (signatureStatus.value.err) {
+                        logger.error({ txid: trade.txid, err: signatureStatus.value.err }, '❌ TRANSAÇÃO FALHOU NA REDE (Poller)');
+                        trade.status = 'failed';
+                        trade.errorMessage = JSON.stringify(signatureStatus.value.err);
+                        await trade.save();
+                    } else if (signatureStatus.value.confirmationStatus === 'confirmed' || signatureStatus.value.confirmationStatus === 'finalized') {
+                        logger.info({ txid: trade.txid, profitUsdc: trade.expectedProfit }, '✅ TRANSAÇÃO CONFIRMADA COM SUCESSO! LUCRO OBTIDO! (Poller)');
+                        trade.status = 'completed';
+                        await trade.save();
+                    }
+                }
+            } catch (err) {
+                console.error(`Erro ao checar transação pendente ${trade.txid}:`, err);
+            }
+        }
+    } catch (err) {
+        console.error('Erro no poller de transações pendentes:', err);
+    }
+}
+
 async function startEngine() {
     console.log('\n=============================================');
     console.log('🚀 INICIANDO MOTOR DE ARBITRAGEM (V2 - WS/SOLID)');
@@ -522,6 +554,7 @@ async function startEngine() {
 
             latestJitoTipLamports = await SolanaService.getDynamicJitoTip();
             cachedSolPriceUsdc = await QuoteService.fetchSolPriceUsdc();
+            await checkPendingTransactions();
             await reloadState();
         }, 15000);
 
