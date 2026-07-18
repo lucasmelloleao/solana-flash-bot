@@ -127,7 +127,7 @@ async function reloadState() {
 
         for (const walletId of uniqueWalletIds) {
             if (!walletCache.has(walletId)) {
-                const keypair = await DatabaseService.getWalletForUser(userIdCache!); // Temporary fix
+                const keypair = await DatabaseService.getWalletById(walletId); // Fetches the specific wallet requested
                 if (keypair) {
                     const usdcAta = SolanaService.deriveAssociatedTokenAddress(USDC_MINT_PK, keypair.publicKey);
                     const balance = await conn.getBalance(keypair.publicKey);
