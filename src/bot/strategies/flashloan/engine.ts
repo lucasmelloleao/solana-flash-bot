@@ -558,11 +558,6 @@ async function startEngine() {
             }
         }, 15000);
 
-        // Poller para transações pendentes a cada 1 minuto (60 segundos)
-        setInterval(async () => {
-            await checkPendingTransactions();
-        }, 60000);
-
         await restartExecutionEngine();
 
     } catch (err) {
