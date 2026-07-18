@@ -273,9 +273,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
                                     
                                     if (confirmation.value.err) {
                                         logger.error({ txid: result.txid, err: confirmation.value.err }, '❌ TRANSAÇÃO FALHOU NA REDE (Revertida)');
-                                        tradeLog.status = 'failed';
-                                        tradeLog.errorMessage = JSON.stringify(confirmation.value.err);
-                                        await tradeLog.save();
+                                        await FlashLoanTrade.deleteOne({ _id: tradeLog._id });
                                     } else {
                                         logger.info({ txid: result.txid, profitUsdc: (profit / 1e6).toFixed(4) }, '✅ TRANSAÇÃO CONFIRMADA COM SUCESSO! LUCRO OBTIDO!');
                                         tradeLog.status = 'completed';
@@ -287,9 +285,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
                             });
 
                         } else {
-                            tradeLog.status = 'failed';
-                            tradeLog.errorMessage = result.jitoError ? JSON.stringify(result.jitoError) : (result.fullJitoResponse ? JSON.stringify(result.fullJitoResponse) : 'Jito rejeitou o bundle sem resposta');
-                            await tradeLog.save();
+                            await FlashLoanTrade.deleteOne({ _id: tradeLog._id });
                             circuitBreaker.recordFailure();
                             logger.error({ txid: result.txid, jitoResponse: result.fullJitoResponse }, '❌ JITO REJEITOU O BUNDLE (Falha ao enviar)');
                         }
@@ -506,9 +502,7 @@ async function checkPendingTransactions() {
                 if (signatureStatus && signatureStatus.value) {
                     if (signatureStatus.value.err) {
                         logger.error({ txid: trade.txid, err: signatureStatus.value.err }, '❌ TRANSAÇÃO FALHOU NA REDE (Poller)');
-                        trade.status = 'failed';
-                        trade.errorMessage = JSON.stringify(signatureStatus.value.err);
-                        await trade.save();
+                        await FlashLoanTrade.deleteOne({ _id: trade._id });
                     } else if (signatureStatus.value.confirmationStatus === 'confirmed' || signatureStatus.value.confirmationStatus === 'finalized') {
                         logger.info({ txid: trade.txid, profitUsdc: trade.expectedProfit }, '✅ TRANSAÇÃO CONFIRMADA COM SUCESSO! LUCRO OBTIDO! (Poller)');
                         trade.status = 'completed';
@@ -554,9 +548,13 @@ async function startEngine() {
 
             latestJitoTipLamports = await SolanaService.getDynamicJitoTip();
             cachedSolPriceUsdc = await QuoteService.fetchSolPriceUsdc();
-            await checkPendingTransactions();
             await reloadState();
         }, 15000);
+
+        // Poller para transações pendentes a cada 1 minuto (60 segundos)
+        setInterval(async () => {
+            await checkPendingTransactions();
+        }, 60000);
 
         await restartExecutionEngine();
 
