@@ -192,12 +192,12 @@ async function runSingleStrategyArbitrage(strategy: any) {
         }
 
         const tokenBorrowed = strategy.tokenAMint || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Defaults to USDC
-        const lendingProvider = strategy.lendingProvider || 'solend';
+        const lendingProvider = strategy.lendingProvider || 'none';
 
-        let poolConfig;
+        let poolConfig = null;
         if (lendingProvider === 'kamino') {
             poolConfig = getKaminoPoolConfig(tokenBorrowed);
-        } else {
+        } else if (lendingProvider === 'solend') {
             poolConfig = getSolendPoolConfig(tokenBorrowed);
         }
 
@@ -208,7 +208,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
         if (!quotes) return;
 
         const { quoteA, quoteB } = quotes;
-        const flashLoanFee = Math.ceil((BORROW_AMOUNT * 9) / 10000); // 0.09% varies by pool in reality
+        const flashLoanFee = lendingProvider === 'none' ? 0 : Math.ceil((BORROW_AMOUNT * 9) / 10000); // 0.09% para Solend/Kamino, 0 no capital próprio
 
         let finalAmount = useRaptor ? parseInt(quoteB.amountOut) : parseInt(quoteB.outAmount);
         if (useRaptor) finalAmount = Math.floor(finalAmount * 0.995);
@@ -253,7 +253,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
                         latestJitoTipLamports,
                         instructionsARes,
                         instructionsBRes,
-                        executionWallet.usdcAta,
+                        lendingProvider === 'none' ? null : executionWallet.usdcAta,
                         poolConfig,
                         lendingProvider
                     );

@@ -5,8 +5,7 @@
   "main": "src/bot/engine.ts",
   "scripts": {
     "start": "tsx src/bot/strategies/flashloan/engine.ts",
-    "scalping": "tsx src/bot/strategies/scalping/scalping-engine.ts",
-    "jupiter-local": "tsx src/bot/services/MockJupiter.ts"
+    "scalping": "tsx src/bot/strategies/scalping/scalping-engine.ts"
   },
   "dependencies": {
     "@jup-ag/api": "^6.0.32",
