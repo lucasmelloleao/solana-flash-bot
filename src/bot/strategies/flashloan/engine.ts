@@ -526,29 +526,36 @@ async function startEngine() {
     try {
         await DatabaseService.connect();
 
-        const status = await DatabaseService.updateHeartbeatAndGetStatus();
-        botMode = status.botMode;
-        connectionMode = status.connectionMode;
-
-        await reloadState();
-
+        // Poller Rápido (3 segundos) para respostas imediatas ao ligar/desligar estratégias no dashboard
         setInterval(async () => {
-            const status = await DatabaseService.updateHeartbeatAndGetStatus();
-            
-            if (status.botMode !== botMode) {
-                 botMode = status.botMode;
-                 console.log(`\n⚙️ Modo do Bot alterado para: ${botMode}`);
-            }
+            try {
+                const status = await DatabaseService.updateHeartbeatAndGetStatus();
+                
+                if (status.botMode !== botMode) {
+                     botMode = status.botMode;
+                     console.log(`\n⚙️ Modo do Bot alterado para: ${botMode}`);
+                }
 
-            if (status.connectionMode !== connectionMode) {
-                 connectionMode = status.connectionMode;
-                 console.log(`\n⚙️ Modo de Conexão alterado para: ${connectionMode}. Reiniciando motor...`);
-                 restartExecutionEngine();
-            }
+                if (status.connectionMode !== connectionMode) {
+                     connectionMode = status.connectionMode;
+                     console.log(`\n⚙️ Modo de Conexão alterado para: ${connectionMode}. Reiniciando motor...`);
+                     restartExecutionEngine();
+                }
 
-            latestJitoTipLamports = await SolanaService.getDynamicJitoTip();
-            cachedSolPriceUsdc = await QuoteService.fetchSolPriceUsdc();
-            await reloadState();
+                await reloadState();
+            } catch (err) {
+                console.error('Erro no poller rápido:', err);
+            }
+        }, 3000);
+
+        // Poller Médio (15 segundos) para atualizar preços e taxas de rede (evita rate limits)
+        setInterval(async () => {
+            try {
+                latestJitoTipLamports = await SolanaService.getDynamicJitoTip();
+                cachedSolPriceUsdc = await QuoteService.fetchSolPriceUsdc();
+            } catch (err) {
+                console.error('Erro no poller de preços:', err);
+            }
         }, 15000);
 
         // Poller para transações pendentes a cada 1 minuto (60 segundos)
