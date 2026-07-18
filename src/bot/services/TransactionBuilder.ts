@@ -148,21 +148,6 @@ export class TransactionBuilder {
         const transactionBase58 = bs58.encode(serialized);
         const txid = bs58.encode(transaction.signatures[0]);
 
-        try {
-            console.log(`\n🔍 [DEBUG] Simulando transação localmente antes de enviar... (${txid})`);
-            const simResult = await connection.simulateTransaction(transaction, { commitment: 'processed' });
-            if (simResult.value.err) {
-                console.log(`🚨 [DEBUG] SIMULAÇÃO FALHOU! Erro:`, JSON.stringify(simResult.value.err));
-                if (simResult.value.logs) {
-                    console.log(`📜 [DEBUG] Logs da Simulação:`);
-                    simResult.value.logs.forEach(log => console.log(`   ${log}`));
-                }
-            } else {
-                console.log(`✅ [DEBUG] SIMULAÇÃO BEM SUCEDIDA! Transação válida.`);
-            }
-        } catch (simErr) {
-            console.log(`⚠️ [DEBUG] Falha ao tentar simular a transação:`, simErr);
-        }
 
         const jitoResponse = await SolanaService.sendJitoBundle(transactionBase58);
         return {
