@@ -566,16 +566,15 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         } catch (err: any) {
             logger.error(`❌ [FALHA NA SAÍDA] Erro ao executar venda a mercado para ${strategy.name}: ${err.message}`);
 
-            // Atualizar status para failed se der erro critico (opcional tentar novamente depois)
+            // ATENÇÃO: Havia um bug fatal aqui. O código antigo deletava a posição da memória se desse erro.
+            // Agora, NÃO deletamos a posição da memória! Mantemos a posição ativa para que o motor
+            // tente liquidar novamente no próximo milissegundo (Retry agressivo), até conseguir.
+            
             await ScalpingTrade.findByIdAndUpdate(position.tradeId, {
-                status: 'failed',
-                errorMessage: `Erro na saída (${exitReason}): ${err.message}`
+                errorMessage: `Falha ao vender (${exitReason}): ${err.message}. Retentando...`
             }).catch(dbErr => logger.error('Falha ao atualizar DB no erro de saída', dbErr));
 
-            // Removemos a posição da memória ou mantemos para tentar sair no próximo tick?
-            // HFT geralmente deve limpar e assumir intervenção manual ou retentativa agressiva.
-            // Para não travar, vamos apagar da memória. O trade fica failed no DB.
-            delete positions[stratId];
+            // Não deletar positions[stratId] !
         } finally {
             (strategy as any).isProcessingTrade = false;
         }
