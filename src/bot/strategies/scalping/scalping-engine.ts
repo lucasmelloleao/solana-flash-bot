@@ -228,18 +228,35 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 position.entryTime = Date.now();
                 position.amount = fetchedOrder.filled || position.amount;
                 
-                await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
-                    status: 'in_position', 
-                    entryPrice: position.entryPrice,
-                    amount: position.amount,
-                    entryTime: new Date(position.entryTime)
-                });
+                // Salvar no DB apenas quando a ordem efetivamente for preenchida!
+                if (!position.tradeId) {
+                    const tradeDoc = await ScalpingTrade.create({
+                        userId: strategy.userId,
+                        strategyId: strategy._id,
+                        type: 'buy',
+                        symbol: strategy.symbol,
+                        price: position.entryPrice,
+                        entryPrice: position.entryPrice,
+                        amount: position.amount,
+                        status: 'in_position',
+                        entryTxid: position.limitBuyOrderId,
+                        entryTime: new Date(position.entryTime)
+                    });
+                    position.tradeId = tradeDoc._id.toString();
+                } else {
+                    await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
+                        status: 'in_position', 
+                        entryPrice: position.entryPrice,
+                        amount: position.amount,
+                        entryTime: new Date(position.entryTime)
+                    });
+                }
                 
                 logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
             } else if (fetchedOrder.status === 'open') {
                 const elapsed = Date.now() - position.entryTime;
-                if (elapsed > 15000) { // 15 segundos de timeout
-                    logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou após 15s. Cancelando restante...`);
+                if (elapsed > 5000) { // 5 segundos de timeout (Reprecificação Adaptativa)
+                    logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou após 5s. Cancelando para reposicionar...`);
                     try {
                         await exchange.cancelOrder(position.limitBuyOrderId, strategy.symbol);
                     } catch (cancelErr) {
@@ -254,20 +271,37 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                         position.entryTime = Date.now();
                         position.amount = fetchedOrder.filled;
                         
-                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
-                            status: 'in_position', 
-                            entryPrice: position.entryPrice,
-                            amount: position.amount,
-                            errorMessage: 'Preenchimento Parcial (Timeout 15s)',
-                            entryTime: new Date(position.entryTime)
-                        });
+                        if (!position.tradeId) {
+                            const tradeDoc = await ScalpingTrade.create({
+                                userId: strategy.userId,
+                                strategyId: strategy._id,
+                                type: 'buy',
+                                symbol: strategy.symbol,
+                                price: position.entryPrice,
+                                entryPrice: position.entryPrice,
+                                amount: position.amount,
+                                status: 'in_position',
+                                entryTxid: position.limitBuyOrderId,
+                                entryTime: new Date(position.entryTime),
+                                errorMessage: 'Preenchimento Parcial (Timeout 5s)'
+                            });
+                            position.tradeId = tradeDoc._id.toString();
+                        } else {
+                            await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
+                                status: 'in_position', 
+                                entryPrice: position.entryPrice,
+                                amount: position.amount,
+                                errorMessage: 'Preenchimento Parcial (Timeout 5s)',
+                                entryTime: new Date(position.entryTime)
+                            });
+                        }
                     } else {
-                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
+                        if (position.tradeId) await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
                         delete positions[stratId];
                     }
                 }
             } else if (fetchedOrder.status === 'canceled' || fetchedOrder.status === 'rejected') {
-                await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Ordem de entrada cancelada' });
+                if (position.tradeId) await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Ordem de entrada cancelada' });
                 delete positions[stratId];
             }
         } catch (e: any) {
@@ -375,21 +409,9 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 (cachedBalances[keyIdStr].free as any)[quoteAsset] -= estimatedCost;
             }
 
-            // 4. Salvar no DB como intenção (pendente)
-            const tradeDoc = await ScalpingTrade.create({
-                userId: strategy.userId,
-                strategyId: strategy._id,
-                type: 'buy',
-                symbol: strategy.symbol,
-                price: limitBuyPrice,
-                entryPrice: limitBuyPrice,
-                amount: formattedAmount,
-                status: 'entry_pending',
-                entryTxid: order.id || order.info?.id || order.clientOrderId
-            });
-
+            // 4. Salvar apenas em memória como intenção (pendente) para evitar lixo no DB
             positions[stratId] = {
-                tradeId: tradeDoc._id.toString(),
+                tradeId: '', // Será gerado quando preencher
                 entryPrice: limitBuyPrice,
                 entryTime: Date.now(),
                 amount: formattedAmount,
@@ -824,9 +846,9 @@ async function startScalpingEngine() {
                 });
 
                 if (activeStrategies.length === 0) {
-                    console.log('\n[WARN] Nenhuma estratégia CEX HFT ativa no momento. Aguardando...');
+                    logger.debug('\n[WARN] Nenhuma estratégia CEX HFT ativa no momento. Aguardando...');
                 } else {
-                    console.log(`\n[INFO] Sincronização: ${activeStrategies.length} estratégias rodando no motor HFT.`);
+                    logger.debug(`\n[DEBUG] Sincronização: ${activeStrategies.length} estratégias rodando no motor HFT.`);
                 }
             } catch (e) {
                 console.error("Erro ao atualizar estratégias:", e);
