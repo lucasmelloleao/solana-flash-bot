@@ -28,6 +28,10 @@ type OpenPosition = {
     amount: number;
     side: 'buy' | 'sell';
     limitSellOrderId?: string;
+    status: 'entry_pending' | 'in_position';
+    limitBuyOrderId?: string;
+    highestPriceReached?: number;
+    trailingActive?: boolean;
 };
 const positions: Record<string, OpenPosition> = {};
 
@@ -88,7 +92,7 @@ function calculateRSI(prices: number[], period: number = 14): number {
 }
 
 // VWAP Math Helper
-function calculateVWAP(ohlcv: number[][]): number {
+function calculateVWAP(ohlcv: any[][]): number {
     let cumulativeTypicalPriceVolume = 0;
     let cumulativeVolume = 0;
     for (const candle of ohlcv) {
@@ -105,7 +109,7 @@ function calculateVWAP(ohlcv: number[][]): number {
 }
 
 // ATR Math Helper
-function calculateATR(ohlcv: number[][], period: number = 14): number {
+function calculateATR(ohlcv: any[][], period: number = 14): number {
     if (ohlcv.length <= period) return 0;
     const trValues: number[] = [];
     
@@ -187,6 +191,7 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
 }
 
 async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Exchange) {
+    const tickStart = performance.now();
     let currentPrice = ticker.last;
     if (!currentPrice) {
         // MEXC e outras CEX enviam BBO (Best Bid/Offer) no ticker sem o last trade
@@ -254,9 +259,67 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         (strategy as any).isProcessingTrade = true;
         (strategy as any).processingSince = Date.now();
         try {
-            logger.info(`🟢 [INICIANDO ENTRADA] HFT Scalper (${strategy.name}) vai analisar compra a mercado (Ticker ~$${currentPrice})...`);
+            const position = positions[stratId];
+            
+            // --- BLOCO DE CHECAGEM DE ENTRADA MAKER ---
+            if (position && position.status === 'entry_pending') {
+                if (!position.limitBuyOrderId) return;
+                
+                try {
+                    const fetchedOrder = await exchange.fetchOrder(position.limitBuyOrderId, strategy.symbol);
+                    if (fetchedOrder.status === 'closed') {
+                        position.status = 'in_position';
+                        position.entryPrice = fetchedOrder.average || fetchedOrder.price || position.entryPrice;
+                        position.entryTime = Date.now();
+                        position.amount = fetchedOrder.filled || position.amount;
+                        
+                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
+                            status: 'in_position', 
+                            entryPrice: position.entryPrice,
+                            amount: position.amount
+                        });
+                        
+                        logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
+                        
+                        // 5. IMEDIATAMENTE pendurar a Ordem Limit de Venda no alvo de Take Profit (Maker-Exit)
+                        try {
+                            const targetPrice = position.entryPrice * (1 + (strategy.takeProfitPercentage / 100));
+                            let sellAmount = position.amount;
+                            if (exchange.amountToPrecision) {
+                                sellAmount = Number(exchange.amountToPrecision(strategy.symbol, position.amount));
+                            }
+                            const limitSellPriceStr = exchange.priceToPrecision ? exchange.priceToPrecision(strategy.symbol, targetPrice) : targetPrice.toFixed(4);
+                            
+                            logger.info(`🚀 [MAKER EXIT] Pendurando Limit Sell de ${sellAmount} a $${limitSellPriceStr} (Alvo: +${strategy.takeProfitPercentage}%)`);
+                            const sellOrder = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, Number(limitSellPriceStr));
+                            
+                            position.limitSellOrderId = sellOrder.id;
+                        } catch (sellErr: any) {
+                            logger.error(`❌ Erro ao pendurar Limit Sell para ${strategy.name}: ${sellErr.message}. A saída será feita a mercado no PnL!`);
+                        }
+                    } else if (fetchedOrder.status === 'open') {
+                        const elapsed = Date.now() - position.entryTime;
+                        if (elapsed > 15000) { // 15 segundos de timeout
+                            logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou sem fill. Cancelando para liberar capital...`);
+                            await exchange.cancelOrder(position.limitBuyOrderId, strategy.symbol);
+                            await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Missed fill)' });
+                            delete positions[stratId];
+                        }
+                    } else if (fetchedOrder.status === 'canceled' || fetchedOrder.status === 'rejected') {
+                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Ordem de entrada cancelada' });
+                        delete positions[stratId];
+                    }
+                } catch (e: any) {
+                    logger.debug(`Aviso: erro ao checar status da Maker Entry: ${e.message}`);
+                }
+                return; // Se tem posição pendente, abortamos o resto do tick
+            }
 
-            logger.info(`[DEBUG] Validando saldo em memória...`);
+            // --- BLOCO DE NOVA ENTRADA ---
+            if (!position) {
+                logger.info(`🟢 [INICIANDO ENTRADA] HFT Scalper (${strategy.name}) vai analisar compra a mercado (Ticker ~$${currentPrice})...`);
+
+                logger.info(`[DEBUG] Validando saldo em memória...`);
             const quoteAsset = strategy.symbol.split('/')[1];
 
             // 1. Checagem de Saldo Rápida (Memória)
@@ -288,11 +351,9 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             }
 
             // 3. Execução Real
-            // Muitas CEX (como a MEXC) desativam ordens Market no Spot. Para garantir execução imediata (Taker), 
-            // usamos Limit Orders enviando o preço um pouco pior (Slippage Buffer), o que cruza o livro imediatamente.
-            const safeBufferBuy = Math.max(strategy.bufferPercentage, 0.1); // No mínimo 0.1% para garantir o fill
-            const limitBuyPrice = currentPrice * (1 + (safeBufferBuy / 100));
-            logger.info(`🚀 HFT ATIVADO: Enviando Limit Buy de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
+            // Modificado para Maker Entry (pescando no bid)
+            const limitBuyPrice = ticker.bid || currentPrice;
+            logger.info(`🚀 HFT MAKER ATIVADO: Pendurando Limit Buy de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
             const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice);
 
             // Subtrair otimisticamente do saldo em memória para evitar que o próximo tick compre novamente antes do update de 15s
@@ -300,72 +361,44 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 (cachedBalances[keyIdStr].free as any)[quoteAsset] -= estimatedCost;
             }
 
-            // Tentar buscar o preço real de execução caso a corretora não retorne imediatamente no createOrder
-            let fetchedOrder = order;
-            let entryPrice = order.average;
-            if (!entryPrice && order.id && exchange.has['fetchOrder']) {
-                try {
-                    await new Promise(res => setTimeout(res, 500)); // Aguarda meio segundo pro matching engine
-                    fetchedOrder = await exchange.fetchOrder(order.id, strategy.symbol);
-                    entryPrice = fetchedOrder.average;
-                } catch (e: any) {
-                    logger.debug(`Aviso: não foi possível fazer fetchOrder da entrada ${order.id}: ${e.message}`);
-                }
-            }
-            
-            // Se ainda não tivermos o preço médio real, fazemos o fallback para o ask
-            entryPrice = entryPrice || ticker.ask || currentPrice;
-            const filledAmount = fetchedOrder.filled || order.filled || formattedAmount;
-
-            // 4. Salvar no DB
+            // 4. Salvar no DB como intenção (pendente)
             const tradeDoc = await ScalpingTrade.create({
                 userId: strategy.userId,
                 strategyId: strategy._id,
-                type: 'buy', // Indicates we started with a buy
+                type: 'buy',
                 symbol: strategy.symbol,
-                price: entryPrice, // For backward compatibility
-                entryPrice: entryPrice,
-                amount: filledAmount,
-                status: 'in_position',
+                price: limitBuyPrice,
+                entryPrice: limitBuyPrice,
+                amount: formattedAmount,
+                status: 'entry_pending',
                 entryTxid: order.id || order.info?.id || order.clientOrderId
             });
 
             positions[stratId] = {
                 tradeId: tradeDoc._id.toString(),
-                entryPrice,
+                entryPrice: limitBuyPrice,
                 entryTime: Date.now(),
-                amount: filledAmount,
-                side: 'buy'
+                amount: formattedAmount,
+                side: 'buy',
+                status: 'entry_pending',
+                limitBuyOrderId: order.id || order.info?.id || order.clientOrderId
             };
 
-            // 5. IMEDIATAMENTE pendurar a Ordem Limit de Venda no alvo de Take Profit (Maker-Exit)
-            try {
-                const targetPrice = entryPrice * (1 + (strategy.takeProfitPercentage / 100));
-                let sellAmount = filledAmount;
-                if (exchange.amountToPrecision) {
-                    sellAmount = Number(exchange.amountToPrecision(strategy.symbol, filledAmount));
-                }
-                const limitSellPriceStr = exchange.priceToPrecision ? exchange.priceToPrecision(strategy.symbol, targetPrice) : targetPrice.toFixed(4);
-                
-                logger.info(`🚀 [MAKER EXIT] Pendurando Limit Sell de ${sellAmount} a $${limitSellPriceStr} (Alvo: +${strategy.takeProfitPercentage}%)`);
-                const sellOrder = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, Number(limitSellPriceStr));
-                
-                positions[stratId].limitSellOrderId = sellOrder.id;
-            } catch (sellErr: any) {
-                logger.error(`❌ Erro ao pendurar Limit Sell para ${strategy.name}: ${sellErr.message}. A saída será feita a mercado no PnL!`);
+            logger.info(`✅ [INTENÇÃO REGISTRADA] Ordem Limit aguardando fill a $${limitBuyPrice.toFixed(4)}.`);
             }
-
-            logger.info(`✅ [ENTRADA CONCLUÍDA] Comprou ${filledAmount} de ${strategy.symbol} a $${entryPrice.toFixed(4)}. ID: ${tradeDoc._id}`);
         } catch (err: any) {
-            logger.error(`❌ Falha ao entrar na operação para ${strategy.name}: ${err.message}`);
+            logger.error(`❌ Falha ao tentar registrar intenção de Maker para ${strategy.name}: ${err.message}`);
         } finally {
             (strategy as any).isProcessingTrade = false;
         }
+        const tickEnd = performance.now();
+        logger.debug(`⏱️ [LATÊNCIA DE ENTRADA] O processamento completo de entrada levou ${(tickEnd - tickStart).toFixed(2)}ms`);
         return;
     }
 
-    // Se TEM posição aberta, verificar as condições de SAÍDA (Gestão de Risco HFT)
-    const timeElapsedMs = Date.now() - position.entryTime;
+    // Se TEM posição aberta E preenchida (in_position), verificar as condições de SAÍDA
+    if (position && position.status === 'in_position') {
+        const timeElapsedMs = Date.now() - position.entryTime;
     
     // Calcula o PnL REAL se fôssemos sair a mercado AGORA (vendendo no Bid)
     const currentExitPrice = ticker.bid || currentPrice;
@@ -383,18 +416,35 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         currentSpread = trend.spreadPct;
     }
 
-    // 1. Condição de Take Profit Fixo (Configurado pelo usuário, representando lucro líquido livre do spread)
-    if (realPnL >= strategy.takeProfitPercentage) {
-        shouldExit = true;
-        exitReason = 'TAKE_PROFIT';
+    // Atualiza o rastreamento do preço máximo (pico) para o Trailing Stop
+    if (!position.highestPriceReached || currentExitPrice > position.highestPriceReached) {
+        position.highestPriceReached = currentExitPrice;
+    }
+    const drawdownFromPeakPct = ((position.highestPriceReached - currentExitPrice) / position.highestPriceReached) * 100;
+
+    // 1. Condição de Take Profit via Trailing Stop
+    // Ativa a proteção quando o alvo inicial é batido
+    if (realPnL >= strategy.takeProfitPercentage && !position.trailingActive) {
+        position.trailingActive = true;
+        logger.info(`🔥 [TRAILING ATIVADO] Meta de +${strategy.takeProfitPercentage}% atingida (PnL Atual: +${realPnL.toFixed(4)}%). Deixando o lucro correr...`);
+    }
+
+    if (position.trailingActive) {
+        // Tolerância de recuo a partir do pico máximo atingido (ex: 40% da meta de TP)
+        // Se a meta for 0.06%, o robô aguenta um recuo de 0.024% a partir do topo antes de vender.
+        const trailingDropTolerance = strategy.takeProfitPercentage * 0.4; 
+        if (drawdownFromPeakPct >= trailingDropTolerance) {
+            shouldExit = true;
+            exitReason = 'TRAILING_STOP_PROFIT';
+        }
     }
     // 2. Condição de Stop Loss Dinâmico (Usando ATR)
     else {
         let dynamicStopLossPct = strategy.stopLossPercentage;
         if (trend && trend.atr && position.entryPrice) {
             const atrPct = (trend.atr / position.entryPrice) * 100;
-            // Usa 1.5x o ATR como stop dinâmico para não ser violinado por ruídos, mas não excede o limite máximo configurado
-            dynamicStopLossPct = Math.min(strategy.stopLossPercentage, atrPct * 1.5);
+            // Usa 3.0x o ATR como stop dinâmico para não ser violinado por ruídos, mas não excede o limite máximo configurado
+            dynamicStopLossPct = Math.min(strategy.stopLossPercentage, atrPct * 3.0);
         }
 
         if (realPnL <= -dynamicStopLossPct) {
@@ -512,8 +562,20 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         } finally {
             (strategy as any).isProcessingTrade = false;
         }
+        const tickEnd = performance.now();
+        logger.debug(`⏱️ [LATÊNCIA DE SAÍDA] O processamento completo de saída levou ${(tickEnd - tickStart).toFixed(2)}ms`);
     }
-}
+    } // Fim do if (position && position.status === 'in_position')
+    
+    // Se não entrou nem saiu (só analisou), logamos latência se for anormal
+    if (!position || position.status !== 'in_position') {
+        const tickEnd = performance.now();
+        const elapsed = tickEnd - tickStart;
+        if (elapsed > 20) {
+            logger.warn(`⚠️ [LENTIDÃO DE TICK] A análise do tick levou ${elapsed.toFixed(2)}ms. Pode indicar gargalo.`);
+        }
+    }
+} // Fim do processTick
 
 async function watchStrategyLoop(strategy: any) {
     if (!strategy.exchangeKeyId) return;
