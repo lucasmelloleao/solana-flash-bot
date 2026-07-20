@@ -216,6 +216,64 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         }
     }
 
+    // --- BLOCO DE CHECAGEM DE ENTRADA MAKER ---
+    if (position && position.status === 'entry_pending') {
+        if (!position.limitBuyOrderId) return;
+        
+        try {
+            const fetchedOrder = await exchange.fetchOrder(position.limitBuyOrderId, strategy.symbol);
+            if (fetchedOrder.status === 'closed') {
+                position.status = 'in_position';
+                position.entryPrice = fetchedOrder.average || fetchedOrder.price || position.entryPrice;
+                position.entryTime = Date.now();
+                position.amount = fetchedOrder.filled || position.amount;
+                
+                await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
+                    status: 'in_position', 
+                    entryPrice: position.entryPrice,
+                    amount: position.amount
+                });
+                
+                logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
+            } else if (fetchedOrder.status === 'open') {
+                const elapsed = Date.now() - position.entryTime;
+                if (elapsed > 15000) { // 15 segundos de timeout
+                    logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou após 15s. Cancelando restante...`);
+                    try {
+                        await exchange.cancelOrder(position.limitBuyOrderId, strategy.symbol);
+                    } catch (cancelErr) {
+                        logger.debug('Ordem já estava cancelada ou fechada ao tentar cancelar no timeout.');
+                    }
+                    
+                    // TRATAMENTO DE COMPRA PARCIAL
+                    if (fetchedOrder.filled && fetchedOrder.filled > 0) {
+                        logger.warn(`⚠️ [COMPRA PARCIAL] A ordem não foi 100% preenchida, mas conseguimos ${fetchedOrder.filled}. Assumindo a posição parcial!`);
+                        position.status = 'in_position';
+                        position.entryPrice = fetchedOrder.average || fetchedOrder.price || position.entryPrice;
+                        position.entryTime = Date.now();
+                        position.amount = fetchedOrder.filled;
+                        
+                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
+                            status: 'in_position', 
+                            entryPrice: position.entryPrice,
+                            amount: position.amount,
+                            errorMessage: 'Preenchimento Parcial (Timeout 15s)'
+                        });
+                    } else {
+                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
+                        delete positions[stratId];
+                    }
+                }
+            } else if (fetchedOrder.status === 'canceled' || fetchedOrder.status === 'rejected') {
+                await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Ordem de entrada cancelada' });
+                delete positions[stratId];
+            }
+        } catch (e: any) {
+            logger.debug(`Aviso: erro ao checar status da Maker Entry: ${e.message}`);
+        }
+        return; // Se tem posição pendente, abortamos o resto do tick até resolver a entrada
+    }
+
     // Se NÃO tem posição aberta, EXECUTAR a ENTRADA (Compra real ao mercado)
     if (!position) {
         // Se a estratégia foi pausada pelo usuário, nós apenas observamos, não compramos
@@ -259,69 +317,6 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         (strategy as any).isProcessingTrade = true;
         (strategy as any).processingSince = Date.now();
         try {
-            const position = positions[stratId];
-            
-            // --- BLOCO DE CHECAGEM DE ENTRADA MAKER ---
-            if (position && position.status === 'entry_pending') {
-                if (!position.limitBuyOrderId) return;
-                
-                try {
-                    const fetchedOrder = await exchange.fetchOrder(position.limitBuyOrderId, strategy.symbol);
-                    if (fetchedOrder.status === 'closed') {
-                        position.status = 'in_position';
-                        position.entryPrice = fetchedOrder.average || fetchedOrder.price || position.entryPrice;
-                        position.entryTime = Date.now();
-                        position.amount = fetchedOrder.filled || position.amount;
-                        
-                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
-                            status: 'in_position', 
-                            entryPrice: position.entryPrice,
-                            amount: position.amount
-                        });
-                        
-                        logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
-                        
-                        // NOTA: A ordem de Limit Sell fixa foi removida para permitir que o Trailing Stop
-                        // deixe o lucro correr indefinidamente. A saída será feita a mercado quando o Trailing Stop Loss for acionado.
-                    } else if (fetchedOrder.status === 'open') {
-                        const elapsed = Date.now() - position.entryTime;
-                        if (elapsed > 15000) { // 15 segundos de timeout
-                            logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou após 15s. Cancelando restante...`);
-                            try {
-                                await exchange.cancelOrder(position.limitBuyOrderId, strategy.symbol);
-                            } catch (cancelErr) {
-                                logger.debug('Ordem já estava cancelada ou fechada ao tentar cancelar no timeout.');
-                            }
-                            
-                            // TRATAMENTO DE COMPRA PARCIAL
-                            if (fetchedOrder.filled && fetchedOrder.filled > 0) {
-                                logger.warn(`⚠️ [COMPRA PARCIAL] A ordem não foi 100% preenchida, mas conseguimos ${fetchedOrder.filled}. Assumindo a posição parcial!`);
-                                position.status = 'in_position';
-                                position.entryPrice = fetchedOrder.average || fetchedOrder.price || position.entryPrice;
-                                position.entryTime = Date.now();
-                                position.amount = fetchedOrder.filled;
-                                
-                                await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
-                                    status: 'in_position', 
-                                    entryPrice: position.entryPrice,
-                                    amount: position.amount,
-                                    errorMessage: 'Preenchimento Parcial (Timeout 15s)'
-                                });
-                            } else {
-                                await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
-                                delete positions[stratId];
-                            }
-                        }
-                    } else if (fetchedOrder.status === 'canceled' || fetchedOrder.status === 'rejected') {
-                        await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Ordem de entrada cancelada' });
-                        delete positions[stratId];
-                    }
-                } catch (e: any) {
-                    logger.debug(`Aviso: erro ao checar status da Maker Entry: ${e.message}`);
-                }
-                return; // Se tem posição pendente, abortamos o resto do tick
-            }
-
             // --- BLOCO DE NOVA ENTRADA ---
             if (!position) {
                 if (strategy.isPaused) {
