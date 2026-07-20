@@ -281,22 +281,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                         
                         logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
                         
-                        // 5. IMEDIATAMENTE pendurar a Ordem Limit de Venda no alvo de Take Profit (Maker-Exit)
-                        try {
-                            const targetPrice = position.entryPrice * (1 + (strategy.takeProfitPercentage / 100));
-                            let sellAmount = position.amount;
-                            if (exchange.amountToPrecision) {
-                                sellAmount = Number(exchange.amountToPrecision(strategy.symbol, position.amount));
-                            }
-                            const limitSellPriceStr = exchange.priceToPrecision ? exchange.priceToPrecision(strategy.symbol, targetPrice) : targetPrice.toFixed(4);
-                            
-                            logger.info(`🚀 [MAKER EXIT] Pendurando Limit Sell de ${sellAmount} a $${limitSellPriceStr} (Alvo: +${strategy.takeProfitPercentage}%)`);
-                            const sellOrder = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, Number(limitSellPriceStr));
-                            
-                            position.limitSellOrderId = sellOrder.id;
-                        } catch (sellErr: any) {
-                            logger.error(`❌ Erro ao pendurar Limit Sell para ${strategy.name}: ${sellErr.message}. A saída será feita a mercado no PnL!`);
-                        }
+                        // NOTA: A ordem de Limit Sell fixa foi removida para permitir que o Trailing Stop
+                        // deixe o lucro correr indefinidamente. A saída será feita a mercado quando o Trailing Stop Loss for acionado.
                     } else if (fetchedOrder.status === 'open') {
                         const elapsed = Date.now() - position.entryTime;
                         if (elapsed > 15000) { // 15 segundos de timeout
