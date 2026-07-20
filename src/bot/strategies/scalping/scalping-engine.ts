@@ -281,6 +281,11 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             return;
         }
 
+        // Checar se a estratégia está em cooldown devido a algum erro da API
+        if ((strategy as any).cooldownUntil && Date.now() < (strategy as any).cooldownUntil) {
+            return;
+        }
+
         // --- NOVO: FILTRO DE TENDÊNCIA E RSI ---
         const trend = trends[stratId];
 
@@ -395,6 +400,21 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             }
         } catch (err: any) {
             logger.error(`❌ Falha ao tentar registrar intenção de Maker para ${strategy.name}: ${err.message}`);
+            
+            // Tratamento sugerido para erro 30004 / Insufficient position
+            if (err.message && (err.message.includes('30004') || err.message.includes('Insufficient position'))) {
+                logger.warn(`🔄 [SYNC] Erro de saldo fantasma. Sincronizando saldo com a Exchange e aplicando cooldown de 5s...`);
+                try {
+                    const keyIdStr = strategy.exchangeKeyId._id.toString();
+                    const quoteAsset = strategy.symbol.split('/')[1];
+                    const newBalance = await exchange.fetchBalance();
+                    cachedBalances[keyIdStr] = newBalance;
+                    logger.info(`✅ [SYNC] Saldo de ${quoteAsset} atualizado para $${(newBalance?.free as any)?.[quoteAsset] ?? 0}`);
+                } catch (syncErr: any) {
+                    logger.error(`Falha ao ressincronizar saldo: ${syncErr.message}`);
+                }
+                (strategy as any).cooldownUntil = Date.now() + 5000; // Cooldown de 5s
+            }
         } finally {
             (strategy as any).isProcessingTrade = false;
         }
@@ -750,6 +770,17 @@ async function hydrateOpenPositions() {
     }
 }
 
+async function cleanupFailedTrades() {
+    try {
+        const result = await ScalpingTrade.deleteMany({ status: 'failed' });
+        if (result.deletedCount && result.deletedCount > 0) {
+            logger.info(`🧹 [LIMPEZA] ${result.deletedCount} registros de trades falhos (failed) foram removidos do banco de dados.`);
+        }
+    } catch (e: any) {
+        logger.error(`Falha ao limpar trades falhos: ${e.message}`);
+    }
+}
+
 async function startScalpingEngine() {
     console.log('\n======================================================');
     console.log('⚡ INICIANDO MOTOR HFT DE SCALPING (WEBSOCKETS CCXT PRO)');
@@ -778,6 +809,7 @@ async function startScalpingEngine() {
         setInterval(async () => {
             try {
                 await fetchActiveStrategies();
+                await cleanupFailedTrades();
                 
                 // Checar se há novas estratégias para iniciar (que deram Play)
                 activeStrategies.forEach(strat => {
