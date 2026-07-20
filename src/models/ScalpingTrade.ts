@@ -14,7 +14,9 @@ const ScalpingTradeSchema = new mongoose.Schema({
   txid: { type: String }, // Deprecated field
   entryTxid: { type: String },
   exitTxid: { type: String },
-  errorMessage: { type: String }
+  errorMessage: { type: String },
+  entryTime: { type: Date },
+  exitTime: { type: Date }
 }, {
   timestamps: {
     createdAt: 'createdAt',

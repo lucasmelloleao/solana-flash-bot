@@ -231,7 +231,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 await ScalpingTrade.findByIdAndUpdate(position.tradeId, { 
                     status: 'in_position', 
                     entryPrice: position.entryPrice,
-                    amount: position.amount
+                    amount: position.amount,
+                    entryTime: new Date(position.entryTime)
                 });
                 
                 logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
@@ -257,7 +258,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                             status: 'in_position', 
                             entryPrice: position.entryPrice,
                             amount: position.amount,
-                            errorMessage: 'Preenchimento Parcial (Timeout 15s)'
+                            errorMessage: 'Preenchimento Parcial (Timeout 15s)',
+                            entryTime: new Date(position.entryTime)
                         });
                     } else {
                         await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
@@ -568,7 +570,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 exitPrice: finalExitPrice,
                 exitTxid: sellOrderId,
                 pnl: finalPnl,
-                errorMessage: exitReason
+                errorMessage: exitReason,
+                exitTime: new Date()
             });
 
             // Limpar a posição
