@@ -5,21 +5,78 @@ import { LRUCache } from 'lru-cache';
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 10, scheduling: 'fifo' });
 const lutCache = new LRUCache<string, AddressLookupTableAccount>({ max: 200 });
-let globalConnection: Connection | null = null;
+let globalReadConnection: Connection | null = null;
+let globalWriteConnection: Connection | null = null;
 let globalWssConnection: Connection | null = null;
 
+// Custom fetch wrapper conforming to standard fetch signature to enforce Keep-Alive and pooling
+// @ts-ignore
+const customFetch = async (input: any, init?: any): Promise<any> => {
+    const url = typeof input === 'string' ? input : (input && input.url) ? input.url : input.toString();
+    // @ts-ignore
+    const headers = init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : {};
+    const method = init?.method || 'GET';
+    const body = init?.body;
+
+    try {
+        const response = await axios({
+            url,
+            method: method as any,
+            headers,
+            data: body,
+            httpsAgent,
+            responseType: 'text', // Expect JSON-RPC text response
+            validateStatus: () => true,
+        });
+
+        // @ts-ignore
+        return new Response(response.data, {
+            status: response.status,
+            statusText: response.statusText,
+            // @ts-ignore
+            headers: new Headers(response.headers as any),
+        });
+    } catch (error: any) {
+        throw new TypeError(error.message || 'Fetch failed');
+    }
+};
+
 export class SolanaService {
-    static async getConnection(): Promise<Connection> {
-        if (!globalConnection) {
-            let rpcUrl = process.env.SOLANA_RPC_URL;
+    static async getReadConnection(): Promise<Connection> {
+        if (!globalReadConnection) {
+            let rpcUrl = process.env.SOLANA_READ_RPC_URL || process.env.SOLANA_RPC_URL;
             if (!rpcUrl && process.env.SHYFT_API_KEY) {
                 rpcUrl = `https://rpc.shyft.to?api_key=${process.env.SHYFT_API_KEY}`;
             } else if (!rpcUrl) {
                 rpcUrl = 'https://api.mainnet-beta.solana.com';
             }
-            globalConnection = new Connection(rpcUrl, 'confirmed');
+            globalReadConnection = new Connection(rpcUrl, {
+                commitment: 'confirmed',
+                fetch: customFetch
+            });
         }
-        return globalConnection;
+        return globalReadConnection;
+    }
+
+    static async getWriteConnection(): Promise<Connection> {
+        if (!globalWriteConnection) {
+            let rpcUrl = process.env.SOLANA_WRITE_RPC_URL || process.env.SOLANA_RPC_URL;
+            if (!rpcUrl && process.env.SHYFT_API_KEY) {
+                rpcUrl = `https://rpc.shyft.to?api_key=${process.env.SHYFT_API_KEY}`;
+            } else if (!rpcUrl) {
+                rpcUrl = 'https://api.mainnet-beta.solana.com';
+            }
+            globalWriteConnection = new Connection(rpcUrl, {
+                commitment: 'confirmed',
+                fetch: customFetch
+            });
+        }
+        return globalWriteConnection;
+    }
+
+    static async getConnection(): Promise<Connection> {
+        // Por padrão, retorna a conexão de leitura para compatibilidade com códigos legados
+        return this.getReadConnection();
     }
 
     static async getWssConnection(): Promise<Connection> {
@@ -29,7 +86,7 @@ export class SolanaService {
                 console.warn('⚠️ SOLANA_WSS_URL not defined. Falling back to HTTP connection for WSS.');
                 return this.getConnection(); // Fallback if wss is missing
             }
-            let rpcUrl = process.env.SOLANA_RPC_URL;
+            let rpcUrl = process.env.SOLANA_READ_RPC_URL || process.env.SOLANA_RPC_URL;
             if (!rpcUrl && process.env.SHYFT_API_KEY) {
                 rpcUrl = `https://rpc.shyft.to?api_key=${process.env.SHYFT_API_KEY}`;
             } else if (!rpcUrl) {
@@ -38,7 +95,8 @@ export class SolanaService {
 
             globalWssConnection = new Connection(rpcUrl, {
                 wsEndpoint: wssUrl,
-                commitment: 'confirmed'
+                commitment: 'confirmed',
+                fetch: customFetch
             });
         }
         return globalWssConnection;
@@ -58,11 +116,12 @@ export class SolanaService {
 
     static async sendJitoBundle(transactionBase58: string) {
         try {
+            const blockEngineUrl = process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
             const payload = { jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[transactionBase58]] };
-            const res = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', payload, { headers: { 'Content-Type': 'application/json' }, httpsAgent, timeout: 3000 });
+            const res = await axios.post(blockEngineUrl, payload, { headers: { 'Content-Type': 'application/json' }, httpsAgent, timeout: 3000 });
             return res.data;
-        } catch (err) {
-            return null;
+        } catch (err: any) {
+            return { error: err.response?.data || err.message };
         }
     }
 

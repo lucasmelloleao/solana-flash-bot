@@ -45,10 +45,10 @@ export class TransactionBuilder {
         jitoTipLamports: number,
         instructionsARes: any,
         instructionsBRes: any,
-        cachedUserAta: PublicKey,
+        cachedUserAta: PublicKey | null,
         poolConfig: any,
-        lendingProvider: 'solend' | 'kamino' = 'solend'
-    ): Promise<{ txid: string, jitoBundleId: string | null } | null> {
+        lendingProvider: 'solend' | 'kamino' | 'none' = 'none'
+    ): Promise<{ txid: string, jitoBundleId: string | null, jitoError?: any, fullJitoResponse?: any } | null> {
 
         const swapA = {
             setupInstructions: (instructionsARes.setupInstructions || []).map(deserializeInstruction),
@@ -72,32 +72,43 @@ export class TransactionBuilder {
         const randomTipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
         const jitoTipIx = SystemProgram.transfer({ fromPubkey: walletKeypair.publicKey, toPubkey: randomTipAccount, lamports: jitoTipLamports });
 
-        let borrowIx: TransactionInstruction;
-        if (lendingProvider === 'kamino') {
-            borrowIx = createKaminoFlashLoanBorrowInstruction(borrowAmount, cachedUserAta, poolConfig);
+        let allIxs: any[] = [];
+
+        if (lendingProvider === 'none') {
+            allIxs = [
+                modifyComputeUnits,
+                ...swapA.setupInstructions, swapA.swapInstruction, swapA.cleanupInstruction,
+                ...swapB.setupInstructions, swapB.swapInstruction, swapB.cleanupInstruction,
+                jitoTipIx
+            ].filter(Boolean);
         } else {
-            borrowIx = createFlashLoanBorrowInstruction(borrowAmount, cachedUserAta, poolConfig);
+            let borrowIx: TransactionInstruction;
+            if (lendingProvider === 'kamino') {
+                borrowIx = createKaminoFlashLoanBorrowInstruction(borrowAmount, cachedUserAta!, poolConfig);
+            } else {
+                borrowIx = createFlashLoanBorrowInstruction(borrowAmount, cachedUserAta!, poolConfig);
+            }
+
+            const preRepayIxs = [
+                modifyComputeUnits, borrowIx,
+                ...swapA.setupInstructions, swapA.swapInstruction, swapA.cleanupInstruction,
+                ...swapB.setupInstructions, swapB.swapInstruction, swapB.cleanupInstruction,
+            ].filter(Boolean);
+
+            const borrowIxIndex = preRepayIxs.indexOf(borrowIx);
+            const repayAmount = borrowAmount + flashLoanFee;
+
+            let repayIx: TransactionInstruction;
+            if (lendingProvider === 'kamino') {
+                repayIx = createKaminoFlashLoanRepayInstruction(repayAmount, borrowIxIndex, cachedUserAta!, walletKeypair.publicKey, poolConfig);
+            } else {
+                repayIx = createFlashLoanRepayInstruction(repayAmount, borrowIxIndex, cachedUserAta!, walletKeypair.publicKey, poolConfig);
+            }
+
+            allIxs = [...preRepayIxs, repayIx, jitoTipIx];
         }
 
-        const preRepayIxs = [
-            modifyComputeUnits, borrowIx,
-            ...swapA.setupInstructions, swapA.swapInstruction, swapA.cleanupInstruction,
-            ...swapB.setupInstructions, swapB.swapInstruction, swapB.cleanupInstruction,
-        ].filter(Boolean);
-
-        const borrowIxIndex = preRepayIxs.indexOf(borrowIx);
-        const repayAmount = borrowAmount + flashLoanFee;
-
-        let repayIx: TransactionInstruction;
-        if (lendingProvider === 'kamino') {
-            repayIx = createKaminoFlashLoanRepayInstruction(repayAmount, borrowIxIndex, cachedUserAta, walletKeypair.publicKey, poolConfig);
-        } else {
-            repayIx = createFlashLoanRepayInstruction(repayAmount, borrowIxIndex, cachedUserAta, walletKeypair.publicKey, poolConfig);
-        }
-
-        const allIxs = [...preRepayIxs, repayIx, jitoTipIx];
-
-        const connection = await SolanaService.getConnection();
+        const connection = await SolanaService.getWriteConnection();
         const { blockhash } = await connection.getLatestBlockhash('confirmed');
 
         let serialized;
@@ -137,10 +148,13 @@ export class TransactionBuilder {
         const transactionBase58 = bs58.encode(serialized);
         const txid = bs58.encode(transaction.signatures[0]);
 
+
         const jitoResponse = await SolanaService.sendJitoBundle(transactionBase58);
         return {
             txid,
-            jitoBundleId: (jitoResponse && jitoResponse.result) ? jitoResponse.result : null
+            jitoBundleId: (jitoResponse && jitoResponse.result) ? jitoResponse.result : null,
+            jitoError: (jitoResponse && jitoResponse.error) ? jitoResponse.error : null,
+            fullJitoResponse: jitoResponse
         };
     }
 }

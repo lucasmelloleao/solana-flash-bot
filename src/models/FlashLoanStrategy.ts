@@ -10,7 +10,7 @@ const FlashLoanStrategySchema = new mongoose.Schema({
   borrowAmount: { type: Number, required: true }, // raw amount
   minProfitUsdc: { type: Number, default: 0 },
   provider: { type: String, enum: ['jupiter', 'raptor'], default: 'jupiter' },
-  lendingProvider: { type: String, enum: ['solend', 'kamino'], default: 'solend' },
+  lendingProvider: { type: String, enum: ['solend', 'kamino', 'none'], default: 'solend' },
   active: { type: Boolean, default: true },
   temporary: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }

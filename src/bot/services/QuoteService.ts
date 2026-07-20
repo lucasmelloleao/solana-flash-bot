@@ -2,7 +2,9 @@ import axios from 'axios';
 import https from 'https';
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 10, scheduling: 'fifo' });
-const jupApi = axios.create({ baseURL: 'https://public.jupiterapi.com', httpsAgent, timeout: 3000 });
+const jupApiUrl = process.env.JUPITER_URL || 'https://public.jupiterapi.com';
+console.log(`🪐 [QuoteService] Roteador Jupiter configurado para: ${jupApiUrl}`);
+const jupApi = axios.create({ baseURL: jupApiUrl, httpsAgent, timeout: 3000 });
 const raptorApi = axios.create({ baseURL: 'https://raptor-beta.solanatracker.io', httpsAgent, timeout: 2000 });
 
 export class QuoteService {
