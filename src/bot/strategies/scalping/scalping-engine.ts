@@ -165,7 +165,7 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
         const instance = new ExchangeClass({
             apiKey: apiKey,
             secret: decryptedSecret,
-            enableRateLimit: true,
+            enableRateLimit: false, // DESLIGADO PARA HFT: A trava padrão do CCXT estava enfileirando as ordens e gerando delay de 3 segundos
             options: {
                 adjustForTimeDifference: true,
                 recvWindow: 60000,
