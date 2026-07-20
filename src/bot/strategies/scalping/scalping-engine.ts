@@ -9,6 +9,7 @@ const logger = {
     info: (msg: string, obj?: any) => console.log(`\n[INFO] ${msg}`, obj || ''),
     warn: (msg: string, obj?: any) => console.warn(`\n[WARN] ${msg}`, obj || ''),
     error: (msg: string, obj?: any) => console.error(`\n[ERROR] ${msg}`, obj || ''),
+    debug: (msg: string, obj?: any) => console.log(`\n[DEBUG] ${msg}`, obj || ''),
 };
 
 let activeStrategies: any[] = [];
@@ -26,6 +27,7 @@ type OpenPosition = {
     entryTime: number;
     amount: number;
     side: 'buy' | 'sell';
+    limitSellOrderId?: string;
 };
 const positions: Record<string, OpenPosition> = {};
 
@@ -34,7 +36,10 @@ type TrendData = {
     ema9: number;
     ema21: number;
     rsi: number;
+    vwap: number;
+    atr: number;
     lastUpdate: number;
+    spreadPct?: number;
 };
 const trends: Record<string, TrendData> = {};
 
@@ -82,6 +87,54 @@ function calculateRSI(prices: number[], period: number = 14): number {
     return 100 - (100 / (1 + rs));
 }
 
+// VWAP Math Helper
+function calculateVWAP(ohlcv: number[][]): number {
+    let cumulativeTypicalPriceVolume = 0;
+    let cumulativeVolume = 0;
+    for (const candle of ohlcv) {
+        const high = Number(candle[2]);
+        const low = Number(candle[3]);
+        const close = Number(candle[4]);
+        const volume = Number(candle[5]);
+        if (isNaN(high) || isNaN(low) || isNaN(close) || isNaN(volume)) continue;
+        const typicalPrice = (high + low + close) / 3;
+        cumulativeTypicalPriceVolume += typicalPrice * volume;
+        cumulativeVolume += volume;
+    }
+    return cumulativeVolume === 0 ? 0 : cumulativeTypicalPriceVolume / cumulativeVolume;
+}
+
+// ATR Math Helper
+function calculateATR(ohlcv: number[][], period: number = 14): number {
+    if (ohlcv.length <= period) return 0;
+    const trValues: number[] = [];
+    
+    for (let i = 1; i < ohlcv.length; i++) {
+        const high = Number(ohlcv[i][2]);
+        const low = Number(ohlcv[i][3]);
+        const prevClose = Number(ohlcv[i-1][4]);
+        if (isNaN(high) || isNaN(low) || isNaN(prevClose)) continue;
+        
+        const tr1 = high - low;
+        const tr2 = Math.abs(high - prevClose);
+        const tr3 = Math.abs(low - prevClose);
+        const tr = Math.max(tr1, tr2, tr3);
+        trValues.push(tr);
+    }
+    
+    if (trValues.length < period) return 0;
+    let trSum = 0;
+    for (let i = 0; i < period; i++) {
+        trSum += trValues[i];
+    }
+    let atr = trSum / period;
+    
+    for (let i = period; i < trValues.length; i++) {
+        atr = ((atr * (period - 1)) + trValues[i]) / period;
+    }
+    return atr;
+}
+
 async function fetchActiveStrategies() {
     activeStrategies = await ScalpingStrategy.find({}).populate('exchangeKeyId');
 }
@@ -109,6 +162,10 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
             apiKey: apiKey,
             secret: decryptedSecret,
             enableRateLimit: true,
+            options: {
+                adjustForTimeDifference: true,
+                recvWindow: 60000,
+            }
         });
 
         exchangeInstances[keyIdStr] = instance;
@@ -175,8 +232,9 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             return;
         }
 
-        if (currentSpread >= strategy.stopLossPercentage || currentSpread >= strategy.takeProfitPercentage) {
-            // Se o spread for maior que o stop loss OU maior que o take profit, o trade é matematicamente inviável
+        const maxAllowedSpread = strategy.maxSpreadPercentage !== undefined ? strategy.maxSpreadPercentage : Math.min(strategy.stopLossPercentage, strategy.takeProfitPercentage);
+        if (currentSpread >= maxAllowedSpread) {
+            // Se o spread for maior que o permitido, o trade é matematicamente inviável
             return; 
         }
 
@@ -186,6 +244,10 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         }
         if (trend.rsi >= 70) {
             // Ignora o tick se o ativo estiver esticado/sobrecomprado (risco de queda iminente)
+            return;
+        }
+        if (trend.vwap && currentPrice < trend.vwap) {
+            // Segurança: Só comprar se o preço estiver acima da VWAP (tendência compradora validada pelo volume)
             return;
         }
 
@@ -230,7 +292,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             // usamos Limit Orders enviando o preço um pouco pior (Slippage Buffer), o que cruza o livro imediatamente.
             const safeBufferBuy = Math.max(strategy.bufferPercentage, 0.1); // No mínimo 0.1% para garantir o fill
             const limitBuyPrice = currentPrice * (1 + (safeBufferBuy / 100));
-            logger.info(`🚀 HFT ATIVADO: Enviando Limit Buy de ${formattedAmount} SOL a $${limitBuyPrice.toFixed(4)}...`);
+            logger.info(`🚀 HFT ATIVADO: Enviando Limit Buy de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
             const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice);
 
             // Subtrair otimisticamente do saldo em memória para evitar que o próximo tick compre novamente antes do update de 15s
@@ -238,8 +300,22 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 (cachedBalances[keyIdStr].free as any)[quoteAsset] -= estimatedCost;
             }
 
-            const entryPrice = order.average || order.price || currentPrice;
-            const filledAmount = order.filled || formattedAmount;
+            // Tentar buscar o preço real de execução caso a corretora não retorne imediatamente no createOrder
+            let fetchedOrder = order;
+            let entryPrice = order.average;
+            if (!entryPrice && order.id && exchange.has['fetchOrder']) {
+                try {
+                    await new Promise(res => setTimeout(res, 500)); // Aguarda meio segundo pro matching engine
+                    fetchedOrder = await exchange.fetchOrder(order.id, strategy.symbol);
+                    entryPrice = fetchedOrder.average;
+                } catch (e: any) {
+                    logger.debug(`Aviso: não foi possível fazer fetchOrder da entrada ${order.id}: ${e.message}`);
+                }
+            }
+            
+            // Se ainda não tivermos o preço médio real, fazemos o fallback para o ask
+            entryPrice = entryPrice || ticker.ask || currentPrice;
+            const filledAmount = fetchedOrder.filled || order.filled || formattedAmount;
 
             // 4. Salvar no DB
             const tradeDoc = await ScalpingTrade.create({
@@ -256,15 +332,32 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
             positions[stratId] = {
                 tradeId: tradeDoc._id.toString(),
-                entryPrice: entryPrice,
+                entryPrice,
                 entryTime: Date.now(),
                 amount: filledAmount,
                 side: 'buy'
             };
 
-            logger.info(`✅ [ENTRADA CONCLUÍDA] Comprou ${filledAmount} de ${strategy.symbol} a $${entryPrice.toFixed(4)}. ID: ${order.id}`);
+            // 5. IMEDIATAMENTE pendurar a Ordem Limit de Venda no alvo de Take Profit (Maker-Exit)
+            try {
+                const targetPrice = entryPrice * (1 + (strategy.takeProfitPercentage / 100));
+                let sellAmount = filledAmount;
+                if (exchange.amountToPrecision) {
+                    sellAmount = Number(exchange.amountToPrecision(strategy.symbol, filledAmount));
+                }
+                const limitSellPriceStr = exchange.priceToPrecision ? exchange.priceToPrecision(strategy.symbol, targetPrice) : targetPrice.toFixed(4);
+                
+                logger.info(`🚀 [MAKER EXIT] Pendurando Limit Sell de ${sellAmount} a $${limitSellPriceStr} (Alvo: +${strategy.takeProfitPercentage}%)`);
+                const sellOrder = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, Number(limitSellPriceStr));
+                
+                positions[stratId].limitSellOrderId = sellOrder.id;
+            } catch (sellErr: any) {
+                logger.error(`❌ Erro ao pendurar Limit Sell para ${strategy.name}: ${sellErr.message}. A saída será feita a mercado no PnL!`);
+            }
+
+            logger.info(`✅ [ENTRADA CONCLUÍDA] Comprou ${filledAmount} de ${strategy.symbol} a $${entryPrice.toFixed(4)}. ID: ${tradeDoc._id}`);
         } catch (err: any) {
-            logger.error(`❌ [FALHA NA ENTRADA] Erro ao executar compra a mercado para ${strategy.name}: ${err.message}`);
+            logger.error(`❌ Falha ao entrar na operação para ${strategy.name}: ${err.message}`);
         } finally {
             (strategy as any).isProcessingTrade = false;
         }
@@ -273,7 +366,10 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
     // Se TEM posição aberta, verificar as condições de SAÍDA (Gestão de Risco HFT)
     const timeElapsedMs = Date.now() - position.entryTime;
-    const priceDiffPercentage = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+    
+    // Calcula o PnL REAL se fôssemos sair a mercado AGORA (vendendo no Bid)
+    const currentExitPrice = ticker.bid || currentPrice;
+    const realPnL = ((currentExitPrice - position.entryPrice) / position.entryPrice) * 100;
 
     let shouldExit = false;
     let exitReason = '';
@@ -287,55 +383,101 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         currentSpread = trend.spreadPct;
     }
 
-    // 1. Condição de Lucro Dinâmico (Micro-Scalping vencendo o Spread + 1% de lucro livre)
-    if (currentSpread > 0 && priceDiffPercentage >= (currentSpread * 1.01)) {
-        shouldExit = true;
-        exitReason = 'SPREAD_PROFIT';
-    }
-    // 2. Condição de Take Profit Fixo
-    else if (priceDiffPercentage >= strategy.takeProfitPercentage) {
+    // 1. Condição de Take Profit Fixo (Configurado pelo usuário, representando lucro líquido livre do spread)
+    if (realPnL >= strategy.takeProfitPercentage) {
         shouldExit = true;
         exitReason = 'TAKE_PROFIT';
     }
-    // 2. Condição de Stop Loss
-    else if (priceDiffPercentage <= -strategy.stopLossPercentage) {
-        shouldExit = true;
-        exitReason = 'STOP_LOSS';
-    }
-    // 3. Condição de Timeout (Max Tempo Posicionado)
-    else if (timeElapsedMs >= strategy.maxPositionTimeMs) {
-        shouldExit = true;
-        exitReason = 'TIMEOUT';
+    // 2. Condição de Stop Loss Dinâmico (Usando ATR)
+    else {
+        let dynamicStopLossPct = strategy.stopLossPercentage;
+        if (trend && trend.atr && position.entryPrice) {
+            const atrPct = (trend.atr / position.entryPrice) * 100;
+            // Usa 1.5x o ATR como stop dinâmico para não ser violinado por ruídos, mas não excede o limite máximo configurado
+            dynamicStopLossPct = Math.min(strategy.stopLossPercentage, atrPct * 1.5);
+        }
+
+        if (realPnL <= -dynamicStopLossPct) {
+            shouldExit = true;
+            exitReason = 'STOP_LOSS (ATR_DYNAMIC)';
+        }
+        // 3. Condição de Timeout (Max Tempo Posicionado)
+        else if (timeElapsedMs >= strategy.maxPositionTimeMs) {
+            shouldExit = true;
+            exitReason = 'TIMEOUT';
+        }
     }
 
     if (shouldExit) {
         (strategy as any).isProcessingTrade = true;
         (strategy as any).processingSince = Date.now();
         try {
-            logger.info(`🔴 [INICIANDO SAÍDA: ${exitReason}] HFT Scalper (${strategy.name}) vai vender a mercado. PnL atual: ${priceDiffPercentage.toFixed(4)}%`);
+            // Se temos uma ordem pendurada (Maker), precisamos checar se já foi preenchida, ou CANCELAR
+            let limitOrderWasFilled = false;
+            let finalExitPrice: any = currentExitPrice;
 
-            // 1. Precisão
-            let sellAmount = position.amount;
-            if (exchange.amountToPrecision) {
-                sellAmount = Number(exchange.amountToPrecision(strategy.symbol, position.amount));
+            if (position.limitSellOrderId) {
+                try {
+                    const fetchedSell = await exchange.fetchOrder(position.limitSellOrderId, strategy.symbol);
+                    if (fetchedSell.status === 'closed') {
+                        limitOrderWasFilled = true;
+                        finalExitPrice = fetchedSell.average || fetchedSell.price || currentExitPrice;
+                        logger.info(`🟢 [LIMIT EXECUTADA] Ordem Limit Sell foi totalmente preenchida a $${finalExitPrice}!`);
+                    } else {
+                        logger.info(`⚠️ Cancelando Ordem Limit pendente (${position.limitSellOrderId}) para saída ${exitReason}...`);
+                        await exchange.cancelOrder(position.limitSellOrderId, strategy.symbol);
+                    }
+                } catch (e: any) {
+                    // Se falhar em cancelar, pode significar que acabou de fechar. 
+                    if (e.message.toLowerCase().includes('not found') || e.message.toLowerCase().includes('closed')) {
+                        limitOrderWasFilled = true;
+                        logger.info(`🟢 [LIMIT EXECUTADA] Ordem Limit não encontrada para cancelar (provavelmente executou agora).`);
+                    } else {
+                        logger.warn(`Aviso: erro ao checar/cancelar Limit Sell: ${e.message}`);
+                    }
+                }
             }
 
-            // 2. Execução Real (Saída Limit Taker)
-            const safeBufferSell = Math.max(strategy.bufferPercentage, 0.1); // No mínimo 0.1%
-            const limitSellPrice = currentPrice * (1 - (safeBufferSell / 100));
-            const order = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, limitSellPrice);
-            const exitPrice = order.average || order.price || currentPrice;
-            const finalPnl = ((exitPrice - position.entryPrice) / position.entryPrice) * 100;
+            // Se não executou pela Limit (ex: Stop Loss ou Timeout), vendemos a mercado (Limit Taker)
+            let sellOrderId = position.limitSellOrderId;
+            if (!limitOrderWasFilled) {
+                logger.info(`🔴 [INICIANDO SAÍDA A MERCADO: ${exitReason}] HFT Scalper (${strategy.name}). PnL atual: ${realPnL.toFixed(4)}%`);
+                let sellAmount = position.amount;
+                if (exchange.amountToPrecision) {
+                    sellAmount = Number(exchange.amountToPrecision(strategy.symbol, position.amount));
+                }
 
+                const safeBufferSell = Math.max(strategy.bufferPercentage, 0.1); 
+                const limitSellPrice = currentPrice * (1 - (safeBufferSell / 100));
+                const order = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, limitSellPrice);
+                sellOrderId = order.id;
+
+                let fetchedOrder = order;
+                finalExitPrice = order.average;
+                if (!finalExitPrice && order.id && exchange.has['fetchOrder']) {
+                    try {
+                        await new Promise(res => setTimeout(res, 500));
+                        fetchedOrder = await exchange.fetchOrder(order.id, strategy.symbol);
+                        if (fetchedOrder.average) {
+                            finalExitPrice = fetchedOrder.average;
+                        }
+                    } catch (e: any) {
+                        logger.debug(`Aviso: não foi possível fazer fetchOrder da saída a mercado: ${e.message}`);
+                    }
+                }
+                finalExitPrice = finalExitPrice || ticker.bid || currentPrice;
+            }
+
+            const finalPnl = ((finalExitPrice - position.entryPrice) / position.entryPrice) * 100;
             const keyIdStr = strategy.keyIdStr || strategy.exchangeKeyId._id.toString();
 
-            logger.info(`✅ [SAÍDA CONCLUÍDA] Vendeu ${sellAmount} de ${strategy.symbol} a $${exitPrice.toFixed(4)}. Tempo: ${timeElapsedMs}ms. PnL Final: ${finalPnl.toFixed(4)}%`);
+            logger.info(`✅ [SAÍDA CONCLUÍDA] Vendeu ${position.amount} de ${strategy.symbol} a $${finalExitPrice.toFixed(4)}. Tempo: ${timeElapsedMs}ms. PnL Final: ${finalPnl.toFixed(4)}%`);
 
             // 3. Atualizar Banco de Dados
             await ScalpingTrade.findByIdAndUpdate(position.tradeId, {
                 status: 'success',
-                exitPrice: exitPrice,
-                exitTxid: order.id || order.info?.id || order.clientOrderId,
+                exitPrice: finalExitPrice,
+                exitTxid: sellOrderId,
                 pnl: finalPnl,
                 errorMessage: exitReason
             });
@@ -421,11 +563,12 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
             // Busca as últimas velas de 1 minuto
             const ohlcv = await exchange.fetchOHLCV(strategy.symbol, '1m', undefined, 30);
             if (ohlcv && ohlcv.length > 0) {
-                const closes = ohlcv.map(candle => candle[4]); // Fechamento é o índice 4
-                
+                const closes = ohlcv.map(candle => Number(candle[4])).filter(c => !isNaN(c)); // Fechamento é o índice 4
                 const ema9 = calculateEMA(closes, 9);
                 const ema21 = calculateEMA(closes, 21);
                 const rsi = calculateRSI(closes, 14);
+                const vwap = calculateVWAP(ohlcv);
+                const atr = calculateATR(ohlcv, 14);
                 
                 const isUptrend = ema9 > ema21;
                 
@@ -435,6 +578,8 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                     ema9,
                     ema21,
                     rsi,
+                    vwap,
+                    atr,
                     lastUpdate: Date.now()
                 };
 
@@ -448,16 +593,19 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                     }
                 } catch(e) {}
 
+                // Atualiza o spreadPct na memória também
+                trends[stratId].spreadPct = spreadPct;
+
                 let statusMessage = '🚀 ALTA (Liberado)';
                 if (!isUptrend) {
                     statusMessage = '🩸 BAIXA (Aguardando)';
                 } else if (rsi >= 70) {
                     statusMessage = '🛑 SOBRECOMPRADO';
-                } else if (spreadPct >= strategy.stopLossPercentage || spreadPct >= strategy.takeProfitPercentage) {
+                } else if (spreadPct >= (strategy.maxSpreadPercentage !== undefined ? strategy.maxSpreadPercentage : Math.min(strategy.stopLossPercentage, strategy.takeProfitPercentage))) {
                     statusMessage = '🛑 SPREAD ALTO';
                 }
 
-                logger.info(`[TREND] ${strategy.symbol}: EMA9=${ema9.toFixed(4)} | EMA21=${ema21.toFixed(4)} | RSI=${rsi.toFixed(1)} | Spread: ${spreadLog} -> ${statusMessage}`);
+                logger.info(`[TREND] ${strategy.symbol}: EMA9=${ema9.toFixed(4)} | EMA21=${ema21.toFixed(4)} | RSI=${rsi.toFixed(1)} | VWAP=${vwap.toFixed(4)} | ATR=${atr.toFixed(4)} | Spread: ${spreadLog} -> ${statusMessage}`);
                 
                 // Salvar no Banco de Dados para o Dashboard ler
                 await ScalpingStrategy.findByIdAndUpdate(stratId, {
@@ -467,6 +615,8 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                         spreadPct,
                         ema9,
                         ema21,
+                        vwap,
+                        atr,
                         statusMessage,
                         lastUpdate: new Date()
                     }

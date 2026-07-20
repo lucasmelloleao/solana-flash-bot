@@ -8,6 +8,7 @@ const ScalpingStrategySchema = new mongoose.Schema({
   tradeSize: { type: Number, required: true }, // Size in base currency or quote currency
   takeProfitPercentage: { type: Number, required: true },
   stopLossPercentage: { type: Number, required: true },
+  maxSpreadPercentage: { type: Number, default: 0.1 },
   maxPositionTimeMs: { type: Number, default: 30000 },
   bufferPercentage: { type: Number, default: 0.01 },
   active: { type: Boolean, default: true },
@@ -17,6 +18,8 @@ const ScalpingStrategySchema = new mongoose.Schema({
     spreadPct: Number,
     ema9: Number,
     ema21: Number,
+    vwap: Number,
+    atr: Number,
     statusMessage: String,
     lastUpdate: Date
   }
