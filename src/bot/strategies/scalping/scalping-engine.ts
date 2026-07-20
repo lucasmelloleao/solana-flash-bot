@@ -428,9 +428,13 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         currentSpread = trend.spreadPct;
     }
 
+    const trailingDropTolerance = strategy.takeProfitPercentage * 0.4;
+
     // Atualiza o rastreamento do preço máximo (pico) para o Trailing Stop
+    let newPeak = false;
     if (!position.highestPriceReached || currentExitPrice > position.highestPriceReached) {
         position.highestPriceReached = currentExitPrice;
+        newPeak = true;
     }
     const drawdownFromPeakPct = ((position.highestPriceReached - currentExitPrice) / position.highestPriceReached) * 100;
 
@@ -438,13 +442,16 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
     // Ativa a proteção quando o alvo inicial é batido
     if (realPnL >= strategy.takeProfitPercentage && !position.trailingActive) {
         position.trailingActive = true;
-        logger.info(`🔥 [TRAILING ATIVADO] Meta de +${strategy.takeProfitPercentage}% atingida (PnL Atual: +${realPnL.toFixed(4)}%). Deixando o lucro correr...`);
+        const exitTriggerPrice = position.highestPriceReached * (1 - (trailingDropTolerance / 100));
+        logger.info(`🔥 [TRAILING ATIVADO] Meta de +${strategy.takeProfitPercentage}% atingida (PnL Atual: +${realPnL.toFixed(4)}%). Alvo de saída de segurança em $${exitTriggerPrice.toFixed(4)}`);
+    } else if (position.trailingActive && newPeak) {
+        const exitTriggerPrice = position.highestPriceReached * (1 - (trailingDropTolerance / 100));
+        logger.info(`📈 [TRAILING ATUALIZADO] Novo pico alcançado ($${position.highestPriceReached.toFixed(4)}). Alvo de saída de segurança subiu para $${exitTriggerPrice.toFixed(4)}`);
     }
 
     if (position.trailingActive) {
         // Tolerância de recuo a partir do pico máximo atingido (ex: 40% da meta de TP)
         // Se a meta for 0.06%, o robô aguenta um recuo de 0.024% a partir do topo antes de vender.
-        const trailingDropTolerance = strategy.takeProfitPercentage * 0.4; 
         if (drawdownFromPeakPct >= trailingDropTolerance) {
             shouldExit = true;
             exitReason = 'TRAILING_STOP_PROFIT';
