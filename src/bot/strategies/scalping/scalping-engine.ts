@@ -324,29 +324,30 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
             // --- BLOCO DE NOVA ENTRADA ---
             if (!position) {
-                logger.info(`🟢 [INICIANDO ENTRADA] HFT Scalper (${strategy.name}) vai analisar compra a mercado (Ticker ~$${currentPrice})...`);
+                if (strategy.isPaused) {
+                    // Robô está em modo de "Desligamento Gracioso". Ele não entra mais, apenas aguarda zerar posições.
+                    return; 
+                }
 
-                logger.info(`[DEBUG] Validando saldo em memória...`);
-            const quoteAsset = strategy.symbol.split('/')[1];
+                const quoteAsset = strategy.symbol.split('/')[1];
+                const keyIdStr = strategy.exchangeKeyId._id.toString();
+                const balance = cachedBalances[keyIdStr];
 
-            // 1. Checagem de Saldo Rápida (Memória)
-            const keyIdStr = strategy.exchangeKeyId._id.toString();
-            const balance = cachedBalances[keyIdStr];
+                if (!balance) {
+                    (strategy as any).isProcessingTrade = false;
+                    return;
+                }
 
-            if (!balance) {
-                logger.warn(`Saldo não sincronizado ainda para a estratégia ${strategy.name}. Ignorando tick...`);
-                (strategy as any).isProcessingTrade = false;
-                return;
-            }
+                const quoteBalance = (balance?.free as any)?.[quoteAsset] ?? 0;
+                const estimatedCost = strategy.tradeSize; 
 
-            const quoteBalance = (balance?.free as any)?.[quoteAsset] ?? 0;
-            const estimatedCost = strategy.tradeSize; // $30 USDC
+                // Validação Silenciosa: Se não tem saldo, sequer cogitamos entrar ou anunciamos. O bot ignora a oportunidade.
+                if (quoteBalance < estimatedCost * 1.05) {
+                    (strategy as any).isProcessingTrade = false;
+                    return;
+                }
 
-            if (quoteBalance < estimatedCost * 1.05) {
-                logger.warn(`Saldo insuficiente em ${quoteAsset} para a estratégia ${strategy.name}. Necessário ~$${(estimatedCost * 1.05).toFixed(4)}, Livre: $${quoteBalance}`);
-                (strategy as any).isProcessingTrade = false;
-                return;
-            }
+                logger.info(`🟢 [INICIANDO ENTRADA] HFT Scalper (${strategy.name}) detectou oportunidade e validou o saldo livre ($${quoteBalance.toFixed(2)}). Armando bote...`);
 
             // Converter o valor em dólares (USDC) para a quantidade da moeda (SOL)
             const baseAmount = strategy.tradeSize / currentPrice;
@@ -612,13 +613,22 @@ async function watchStrategyLoop(strategy: any) {
             // Verificar a cada iteração do loop se a estratégia foi pausada no Dashboard
             const currentStrat = activeStrategies.find(s => s._id.toString() === stratId);
             if (!currentStrat) {
-                logger.info(`Estratégia ${strategy.name} foi pausada ou removida. Encerrando loop HFT de ${strategy.symbol}...`);
-                runningLoops[stratId] = false;
-                break;
+                // Se a estratégia foi pausada, mas TEMOS posição aberta, NÃO podemos desligar!
+                if (positions[stratId]) {
+                    if (!strategy.isPaused) {
+                        logger.warn(`⚠️ Estratégia ${strategy.name} pausada no Dashboard, mas existe posição aberta! Mantendo motor HFT ativo APENAS para gerenciar a saída.`);
+                        strategy.isPaused = true;
+                    }
+                } else {
+                    logger.info(`🛑 Estratégia ${strategy.name} pausada. Nenhuma posição aberta. Encerrando loop HFT de ${strategy.symbol}...`);
+                    runningLoops[stratId] = false;
+                    break;
+                }
+            } else {
+                strategy.isPaused = false;
+                // Atualizar os parâmetros do HFT em tempo real caso o usuário edite via Dashboard
+                Object.assign(strategy, currentStrat);
             }
-
-            // Atualizar os parâmetros do HFT em tempo real caso o usuário edite via Dashboard
-            Object.assign(strategy, currentStrat);
 
             // watchTicker is a blocking promise that resolves when a new socket message arrives
             const ticker = await exchange.watchTicker(strategy.symbol);
@@ -683,7 +693,7 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                     statusMessage = '🛑 SPREAD ALTO';
                 }
 
-                logger.info(`[TREND] ${strategy.symbol}: EMA9=${ema9.toFixed(4)} | EMA21=${ema21.toFixed(4)} | RSI=${rsi.toFixed(1)} | VWAP=${vwap.toFixed(4)} | ATR=${atr.toFixed(4)} | Spread: ${spreadLog} -> ${statusMessage}`);
+                logger.debug(`[TREND] ${strategy.symbol}: EMA9=${ema9.toFixed(4)} | EMA21=${ema21.toFixed(4)} | RSI=${rsi.toFixed(1)} | VWAP=${vwap.toFixed(4)} | ATR=${atr.toFixed(4)} | Spread: ${spreadLog} -> ${statusMessage}`);
                 
                 // Salvar no Banco de Dados para o Dashboard ler
                 await ScalpingStrategy.findByIdAndUpdate(stratId, {
@@ -709,6 +719,35 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
     }
 }
 
+async function hydrateOpenPositions() {
+    try {
+        const openTrades = await ScalpingTrade.find({ status: { $in: ['in_position', 'entry_pending'] } });
+        let recovered = 0;
+        for (const trade of openTrades) {
+            if (trade.strategyId) {
+                const stratId = trade.strategyId.toString();
+                if (!positions[stratId]) {
+                    positions[stratId] = {
+                        tradeId: trade._id.toString(),
+                        entryPrice: trade.entryPrice || trade.price || 0,
+                        entryTime: trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now(),
+                        amount: trade.amount || 0,
+                        side: trade.type as 'buy' | 'sell',
+                        status: trade.status as 'in_position' | 'entry_pending'
+                        // highestPriceReached reinicia zerado. Se o preço ainda estiver bom, ele começa a trail de onde parou.
+                    };
+                    recovered++;
+                }
+            }
+        }
+        if (recovered > 0) {
+            logger.info(`♻️ [HYDRATION] ${recovered} posições abertas recuperadas do Banco de Dados e reinjetadas na memória do HFT!`);
+        }
+    } catch (e: any) {
+        logger.error(`Falha ao recuperar posições do BD na inicialização: ${e.message}`);
+    }
+}
+
 async function startScalpingEngine() {
     console.log('\n======================================================');
     console.log('⚡ INICIANDO MOTOR HFT DE SCALPING (WEBSOCKETS CCXT PRO)');
@@ -720,6 +759,8 @@ async function startScalpingEngine() {
         require('../../../models/BotStatus');
 
         await fetchActiveStrategies();
+        await hydrateOpenPositions();
+        
         isRunning = true;
 
         if (activeStrategies.length === 0) {
