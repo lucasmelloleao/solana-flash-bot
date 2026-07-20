@@ -732,7 +732,8 @@ async function hydrateOpenPositions() {
                         entryTime: trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now(),
                         amount: trade.amount || 0,
                         side: trade.type as 'buy' | 'sell',
-                        status: trade.status as 'in_position' | 'entry_pending'
+                        status: trade.status as 'in_position' | 'entry_pending',
+                        limitBuyOrderId: trade.entryTxid // Necessário para a checagem Maker funcionar após reinício!
                         // highestPriceReached reinicia zerado. Se o preço ainda estiver bom, ele começa a trail de onde parou.
                     };
                     recovered++;
