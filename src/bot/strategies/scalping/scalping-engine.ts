@@ -354,7 +354,11 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             // Modificado para Maker Entry (pescando no bid)
             const limitBuyPrice = ticker.bid || currentPrice;
             logger.info(`🚀 HFT MAKER ATIVADO: Pendurando Limit Buy de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
+            
+            const apiStart = performance.now();
             const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice);
+            const apiEnd = performance.now();
+            logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
 
             // Subtrair otimisticamente do saldo em memória para evitar que o próximo tick compre novamente antes do update de 15s
             if (cachedBalances[keyIdStr]?.free?.[quoteAsset]) {
@@ -499,7 +503,12 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
                 const safeBufferSell = Math.max(strategy.bufferPercentage, 0.1); 
                 const limitSellPrice = currentPrice * (1 - (safeBufferSell / 100));
+                
+                const apiStart = performance.now();
                 const order = await exchange.createLimitSellOrder(strategy.symbol, sellAmount, limitSellPrice);
+                const apiEnd = performance.now();
+                logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem de SAÍDA para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
+                
                 sellOrderId = order.id;
 
                 let fetchedOrder = order;
