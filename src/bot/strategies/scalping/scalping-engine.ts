@@ -588,10 +588,14 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
     // Se TEM posição aberta E preenchida (in_position), verificar as condições de SAÍDA
     if (position && position.status === 'in_position') {
         const timeElapsedMs = Date.now() - position.entryTime;
-    
     // Calcula o PnL REAL se fôssemos sair a mercado AGORA (vendendo no Bid)
     const currentExitPrice = ticker.bid || currentPrice;
     const realPnL = ((currentExitPrice - position.entryPrice) / position.entryPrice) * 100;
+
+    // --- NOVO: Salva no Redis para o Dashboard mostrar em tempo real ---
+    position.realPnL = realPnL;
+    position.currentExitPrice = currentExitPrice;
+    await setPosition(stratId, position);
 
     let shouldExit = false;
     let exitReason = '';
