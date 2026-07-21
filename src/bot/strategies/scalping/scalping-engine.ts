@@ -164,8 +164,12 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
         return null;
     }
 
-    if ((ccxt as any).pro[exchangeId]) {
-        const ExchangeClass = (ccxt as any).pro[exchangeId] as any;
+    // Mapeamento de nomes internos do DB para os IDs corretos do CCXT
+    let ccxtExchangeId = exchangeId;
+    if (ccxtExchangeId === 'gateio') ccxtExchangeId = 'gate';
+
+    if ((ccxt as any).pro[ccxtExchangeId]) {
+        const ExchangeClass = (ccxt as any).pro[ccxtExchangeId] as any;
         const instance = new ExchangeClass({
             apiKey: apiKey,
             secret: decryptedSecret,
