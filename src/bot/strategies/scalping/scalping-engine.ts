@@ -533,8 +533,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         let dynamicStopLossPct = strategy.stopLossPercentage;
         if (trend && trend.atr && position.entryPrice) {
             const atrPct = (trend.atr / position.entryPrice) * 100;
-            // Usa 3.0x o ATR como stop dinâmico para não ser violinado por ruídos, mas não excede o limite máximo configurado
-            dynamicStopLossPct = Math.min(strategy.stopLossPercentage, atrPct * 3.0);
+            const absoluteFloor = Math.max(0.05, (strategy.maxSpreadPercentage || 0.05));
+            dynamicStopLossPct = Math.max(absoluteFloor, Math.min(strategy.stopLossPercentage, atrPct * 3.0));
         }
 
         if (realPnL <= -dynamicStopLossPct) {
@@ -580,6 +580,9 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
             // Se não executou pela Limit (ex: Stop Loss ou Timeout), vendemos a mercado (Limit Taker)
             let sellOrderId = position.limitSellOrderId;
+            let soldAmount = position.amount;
+            let isPartialExit = false;
+
             if (!limitOrderWasFilled) {
                 logger.info(`🔴 [INICIANDO SAÍDA A MERCADO: ${exitReason}] HFT Scalper (${strategy.name}). PnL atual: ${realPnL.toFixed(4)}%`);
                 let sellAmount = position.amount;
@@ -611,35 +614,52 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                     }
                 }
                 finalExitPrice = finalExitPrice || ticker.bid || currentPrice;
+
+                // --- NOVO: ESCUDO DE VENDA PARCIAL ---
+                if (fetchedOrder && fetchedOrder.filled !== undefined) {
+                    if (fetchedOrder.filled > 0 && fetchedOrder.filled < position.amount) {
+                        soldAmount = fetchedOrder.filled;
+                        isPartialExit = true;
+                        logger.warn(`⚠️ [VENDA PARCIAL] A exchange preencheu apenas ${soldAmount} de ${position.amount}. Mantendo o resto na posição!`);
+                    } else if (fetchedOrder.filled === 0 && fetchedOrder.status !== 'closed') {
+                        logger.error(`❌ [VENDA ZERADA] A ordem não preencheu nada no book (0 filled). Retentando.`);
+                        throw new Error("Ordem preencheu 0. Mercado sem liquidez imediata no preço enviado.");
+                    }
+                }
             }
 
             const finalPnl = ((finalExitPrice - position.entryPrice) / position.entryPrice) * 100;
             const keyIdStr = strategy.keyIdStr || strategy.exchangeKeyId._id.toString();
 
-            logger.info(`✅ [SAÍDA CONCLUÍDA] Vendeu ${position.amount} de ${strategy.symbol} a $${finalExitPrice.toFixed(4)}. Tempo: ${timeElapsedMs}ms. PnL Final: ${finalPnl.toFixed(4)}%`);
+            logger.info(`✅ [SAÍDA CONCLUÍDA] Vendeu ${soldAmount} de ${strategy.symbol} a $${finalExitPrice.toFixed(4)}. Tempo: ${timeElapsedMs}ms. PnL Final: ${finalPnl.toFixed(4)}%`);
 
-            // 3. Atualizar Banco de Dados
-            await ScalpingTrade.findByIdAndUpdate(position.tradeId, {
-                status: 'success',
-                exitPrice: finalExitPrice,
-                exitTxid: sellOrderId,
-                pnl: finalPnl,
-                errorMessage: exitReason,
-                exitTime: new Date()
-            });
-
-            // Limpar a posição
-            delete positions[stratId];
-
-            // --- NOVO: COOLDOWN ANTI-VIOLINADA ---
-            if (finalPnl < 0) {
-                // Se foi LOSS (Stop Loss), o mercado provavelmente está num caixote ou a tendência esgotou.
-                // Congela a estratégia por 5 minutos para a "poeira baixar" e as médias móveis limparem.
-                cooldowns[stratId] = Date.now() + 5 * 60 * 1000;
-                logger.info(`❄️ [COOLDOWN] Estratégia ${strategy.symbol} pausada por 5 minutos após um Loss, para evitar violinada no caixote.`);
+            if (isPartialExit) {
+                // Atualiza a posição na memória mas não deleta!
+                position.amount -= soldAmount;
+                await ScalpingTrade.findByIdAndUpdate(position.tradeId, {
+                    errorMessage: `Venda Parcial: ${soldAmount} vendidos a $${finalExitPrice.toFixed(4)}. Restam ${position.amount}.`
+                });
             } else {
-                // Se foi GAIN, pausa por apenas 30 segundos para evitar reentrar loucamente no mesmo topo.
-                cooldowns[stratId] = Date.now() + 30 * 1000;
+                // 3. Atualizar Banco de Dados
+                await ScalpingTrade.findByIdAndUpdate(position.tradeId, {
+                    status: 'success',
+                    exitPrice: finalExitPrice,
+                    exitTxid: sellOrderId,
+                    pnl: finalPnl,
+                    errorMessage: exitReason,
+                    exitTime: new Date()
+                });
+
+                // Limpar a posição
+                delete positions[stratId];
+
+                // --- NOVO: COOLDOWN ANTI-VIOLINADA ---
+                if (finalPnl < 0) {
+                    cooldowns[stratId] = Date.now() + 5 * 60 * 1000;
+                    logger.info(`❄️ [COOLDOWN] Estratégia ${strategy.symbol} pausada por 5 minutos após um Loss, para evitar violinada no caixote.`);
+                } else {
+                    cooldowns[stratId] = Date.now() + 30 * 1000;
+                }
             }
 
             // 4. Atualizar o saldo real após a venda
@@ -655,16 +675,13 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             
         } catch (err: any) {
             logger.error(`❌ [FALHA NA SAÍDA] Erro ao executar venda a mercado para ${strategy.name}: ${err.message}`);
-
-            // ATENÇÃO: Havia um bug fatal aqui. O código antigo deletava a posição da memória se desse erro.
-            // Agora, NÃO deletamos a posição da memória! Mantemos a posição ativa para que o motor
-            // tente liquidar novamente no próximo milissegundo (Retry agressivo), até conseguir.
             
             await ScalpingTrade.findByIdAndUpdate(position.tradeId, {
-                errorMessage: `Falha ao vender (${exitReason}): ${err.message}. Retentando...`
+                errorMessage: `Falha ao vender (${exitReason}): ${err.message}. Retentando em 2.5s...`
             }).catch(dbErr => logger.error('Falha ao atualizar DB no erro de saída', dbErr));
 
-            // Não deletar positions[stratId] !
+            // ESCUDO ANTI-BANIMENTO: Atrasa a liberação do lock em 2.5 segundos para não marretar a API
+            await new Promise(res => setTimeout(res, 2500));
         } finally {
             (strategy as any).isProcessingTrade = false;
         }
