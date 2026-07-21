@@ -956,7 +956,7 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                 }
 
                 const priceActStr = trends[stratId].priceAction ? trends[stratId].priceAction.distanceToResistancePct.toFixed(3) + '%' : 'N/A';
-                logger.debug(`[TREND] ${strategy.symbol}: EMA9=${ema9.toFixed(4)} | EMA21=${ema21.toFixed(4)} | RSI=${rsi.toFixed(1)} | VWAP=${vwap.toFixed(4)} | ATR=${atr.toFixed(4)} | PriceAct: ${priceActStr} | Spread: ${spreadLog} -> ${statusMessage}`);
+                // logger.debug(`[TREND] ${strategy.symbol}: EMA9=${ema9.toFixed(4)} | EMA21=${ema21.toFixed(4)} | RSI=${rsi.toFixed(1)} | VWAP=${vwap.toFixed(4)} | ATR=${atr.toFixed(4)} | PriceAct: ${priceActStr} | Spread: ${spreadLog} -> ${statusMessage}`);
                 
                 // Salvar no Banco de Dados para o Dashboard ler
                 await ScalpingStrategy.findByIdAndUpdate(stratId, {
