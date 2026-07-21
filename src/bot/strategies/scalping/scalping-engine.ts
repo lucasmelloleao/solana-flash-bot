@@ -4,6 +4,7 @@ import ScalpingTrade from '../../../models/ScalpingTrade';
 import BotStatus from '../../../models/BotStatus';
 import { decryptSecretKey } from '../../../utils/encryption';
 import * as ccxt from 'ccxt';
+import Redis from 'ioredis';
 
 const logger = {
     info: (msg: string, obj?: any) => console.log(`\n[INFO] ${msg}`, obj || ''),
@@ -971,28 +972,55 @@ async function startScalpingEngine() {
             watchStrategyLoop(strat).catch(e => logger.error(`Erro fatal no loop da estratégia ${strat.name}: ${e.message}`));
         });
 
-        // Loop paralelo para atualizar as definições de estratégias vindas do banco a cada 15s
+        // Substituição do polling de 15s por Redis Pub/Sub (Event-Driven HFT)
+        const redisUrl = process.env.REDIS_URL;
+        if (redisUrl) {
+            const sub = new Redis(redisUrl, { maxRetriesPerRequest: null });
+            sub.on('error', (err) => {
+                logger.error(`[REDIS ERROR] Conexão falhou: ${err.message}`);
+            });
+            sub.subscribe('hft-control');
+            sub.on('message', async (channel, message) => {
+                try {
+                    const payload = JSON.parse(message);
+                    if (payload.action === 'STRATEGY_UPDATED') {
+                        const strat = await ScalpingStrategy.findById(payload.strategyId).populate('exchangeKeyId');
+                        if (strat && strat.active) {
+                            const idx = activeStrategies.findIndex(s => s._id.toString() === payload.strategyId);
+                            if (idx >= 0) {
+                                activeStrategies[idx] = strat;
+                                logger.info(`[UPDATE] Estratégia atualizada via Redis: ${strat.name}`);
+                            } else {
+                                activeStrategies.push(strat);
+                                logger.info(`[PLAY] Estratégia ativada via Redis: ${strat.name}`);
+                            }
+                            
+                            if (!runningLoops[payload.strategyId]) {
+                                watchStrategyLoop(strat).catch(e => logger.error(`Erro fatal no loop da estratégia ${strat.name}: ${e.message}`));
+                            }
+                        } else {
+                            activeStrategies = activeStrategies.filter(s => s._id.toString() !== payload.strategyId);
+                            logger.info(`[PAUSE] Estratégia pausada via Redis: ID ${payload.strategyId}`);
+                        }
+                    } else if (payload.action === 'STRATEGY_DELETED') {
+                        activeStrategies = activeStrategies.filter(s => s._id.toString() !== payload.strategyId);
+                        logger.info(`[DELETE] Estratégia removida via Redis: ID ${payload.strategyId}`);
+                    }
+                } catch (err: any) {
+                    logger.error(`Erro no evento Redis: ${err.message}`);
+                }
+            });
+            logger.info(`[REDIS] Ouvindo eventos em hft-control...`);
+        } else {
+            logger.warn('⚠️ REDIS_URL não configurada. O motor não receberá comandos em tempo real do Dashboard.');
+        }
+
+        // Mantém apenas a limpeza de trades falhos periodicamente
         setInterval(async () => {
             try {
-                await fetchActiveStrategies();
                 await cleanupFailedTrades();
-                
-                // Checar se há novas estratégias para iniciar (que deram Play)
-                activeStrategies.forEach(strat => {
-                    const idStr = strat._id.toString();
-                    if (!runningLoops[idStr]) {
-                        logger.info(`[PLAY] Iniciando loop HFT para a estratégia recém-ativada: ${strat.name}`);
-                        watchStrategyLoop(strat).catch(e => logger.error(`Erro fatal no loop da estratégia ${strat.name}: ${e.message}`));
-                    }
-                });
-
-                if (activeStrategies.length === 0) {
-                    logger.debug('\n[WARN] Nenhuma estratégia CEX HFT ativa no momento. Aguardando...');
-                } else {
-                    logger.debug(`\n[DEBUG] Sincronização: ${activeStrategies.length} estratégias rodando no motor HFT.`);
-                }
             } catch (e) {
-                console.error("Erro ao atualizar estratégias:", e);
+                console.error("Erro no loop de limpeza de trades:", e);
             }
         }, 15000);
 
