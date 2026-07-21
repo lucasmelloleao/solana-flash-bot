@@ -21,6 +21,16 @@ const runningLoops: Record<string, boolean> = {}; // Mapeia o ID da estratégia 
 const exchangeInstances: Record<string, ccxt.Exchange> = {};
 const cachedBalances: Record<string, any> = {};
 
+const redisUrl = process.env.REDIS_URL;
+export const redisClient = redisUrl ? new Redis(redisUrl) : null;
+
+async function updateCachedBalance(keyId: string, balance: any) {
+    cachedBalances[keyId] = balance;
+    if (redisClient) {
+        redisClient.hset('hft:balances', keyId, JSON.stringify(balance)).catch(e => logger.error(`Erro Redis hset balances: ${e.message}`));
+    }
+}
+
 // Stateful memory of open positions
 type OpenPosition = {
     tradeId: string;
@@ -36,6 +46,20 @@ type OpenPosition = {
     breakEvenActive?: boolean;
 };
 const positions: Record<string, OpenPosition> = {};
+
+async function setPosition(stratId: string, pos: OpenPosition) {
+    positions[stratId] = pos;
+    if (redisClient) {
+        redisClient.hset('hft:positions', stratId, JSON.stringify(pos)).catch(e => logger.error(`Erro Redis hset pos: ${e.message}`));
+    }
+}
+
+async function removePosition(stratId: string) {
+    delete positions[stratId];
+    if (redisClient) {
+        redisClient.hdel('hft:positions', stratId).catch(e => logger.error(`Erro Redis hdel pos: ${e.message}`));
+    }
+}
 
 type TrendData = {
     isUptrend: boolean;
@@ -190,7 +214,7 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
         try {
             logger.info(`Buscando saldo inicial para ${exchangeId.toUpperCase()}...`);
             const initialBalance = await instance.fetchBalance();
-            cachedBalances[keyIdStr] = initialBalance;
+            await updateCachedBalance(keyIdStr, initialBalance);
         } catch (e: any) {
             logger.warn(`Aviso: Falha ao buscar saldo inicial na CEX ${exchangeId.toUpperCase()}: ${e.message}`);
         }
@@ -309,12 +333,12 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                         }
                     } else {
                         if (position.tradeId) await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
-                        delete positions[stratId];
+                        await removePosition(stratId);
                     }
                 }
             } else if (fetchedOrder.status === 'canceled' || fetchedOrder.status === 'rejected') {
                 if (position.tradeId) await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Ordem de entrada cancelada' });
-                delete positions[stratId];
+                await removePosition(stratId);
             }
         } catch (e: any) {
             logger.debug(`Aviso: erro ao checar status da Maker Entry: ${e.message}`);
@@ -438,30 +462,49 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             // 3. Execução Real
             // Modificado para Maker Entry (pescando no bid)
             const limitBuyPrice = ticker.bid || currentPrice;
-            logger.info(`🚀 HFT MAKER ATIVADO: Pendurando Limit Buy (Post-Only) de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
             
-            const apiStart = performance.now();
-            const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice, { postOnly: true });
-            const apiEnd = performance.now();
-            logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
-
-            // Subtrair otimisticamente do saldo em memória para evitar que o próximo tick compre novamente antes do update de 15s
-            if (cachedBalances[keyIdStr]?.free?.[quoteAsset]) {
-                (cachedBalances[keyIdStr].free as any)[quoteAsset] -= estimatedCost;
-            }
-
-            // 4. Salvar apenas em memória como intenção (pendente) para evitar lixo no DB
-            positions[stratId] = {
-                tradeId: '', // Será gerado quando preencher
+            // Distributed Lock: Tentar reservar a posição no Redis primeiro
+            const lockPos = {
+                tradeId: '',
                 entryPrice: limitBuyPrice,
                 entryTime: Date.now(),
                 amount: formattedAmount,
-                side: 'buy',
-                status: 'entry_pending',
-                limitBuyOrderId: order.id || order.info?.id || order.clientOrderId
+                side: 'buy' as const,
+                status: 'entry_pending' as const
             };
+            
+            if (redisClient) {
+                const acquired = await redisClient.hsetnx('hft:positions', stratId, JSON.stringify(lockPos));
+                if (acquired === 0) {
+                    logger.warn(`⚠️ [LOCK] Outra instância já iniciou entrada para ${strategy.name}. Abortando duplicidade.`);
+                    (strategy as any).isProcessingTrade = false;
+                    return;
+                }
+            }
 
-            logger.info(`✅ [INTENÇÃO REGISTRADA] Ordem Limit aguardando fill a $${limitBuyPrice.toFixed(4)}.`);
+            logger.info(`🚀 HFT MAKER ATIVADO: Pendurando Limit Buy (Post-Only) de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
+            
+            try {
+                const apiStart = performance.now();
+                const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice, { postOnly: true });
+                const apiEnd = performance.now();
+                logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
+
+                // Subtrair otimisticamente do saldo em memória para evitar que o próximo tick compre novamente antes do update de 15s
+                if (cachedBalances[keyIdStr]?.free?.[quoteAsset]) {
+                    (cachedBalances[keyIdStr].free as any)[quoteAsset] -= estimatedCost;
+                    updateCachedBalance(keyIdStr, cachedBalances[keyIdStr]);
+                }
+
+                // 4. Salvar apenas em memória como intenção (pendente) para evitar lixo no DB
+                const finalPos = { ...lockPos, limitBuyOrderId: order.id || order.info?.id || order.clientOrderId };
+                await setPosition(stratId, finalPos);
+
+                logger.info(`✅ [INTENÇÃO REGISTRADA] Ordem Limit aguardando fill a $${limitBuyPrice.toFixed(4)}.`);
+            } catch (err: any) {
+                if (redisClient) await redisClient.hdel('hft:positions', stratId); // Liberar o lock em caso de erro na CEX
+                throw err;
+            }
             }
         } catch (err: any) {
             logger.error(`❌ Falha ao tentar registrar intenção de Maker para ${strategy.name}: ${err.message}`);
@@ -473,7 +516,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                     const keyIdStr = strategy.exchangeKeyId._id.toString();
                     const quoteAsset = strategy.symbol.split('/')[1];
                     const newBalance = await exchange.fetchBalance();
-                    cachedBalances[keyIdStr] = newBalance;
+                    await updateCachedBalance(keyIdStr, newBalance);
                     logger.info(`✅ [SYNC] Saldo de ${quoteAsset} atualizado para $${(newBalance?.free as any)?.[quoteAsset] ?? 0}`);
                 } catch (syncErr: any) {
                     logger.error(`Falha ao ressincronizar saldo: ${syncErr.message}`);
@@ -689,7 +732,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 });
 
                 // Limpar a posição
-                delete positions[stratId];
+                await removePosition(stratId);
 
                 // --- NOVO: COOLDOWN ANTI-VIOLINADA ---
                 if (finalPnl < 0) {
@@ -706,9 +749,9 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             try {
                 logger.info(`[DEBUG] Atualizando saldo real após saída para liberar reentrada...`);
                 const newBalance = await exchange.fetchBalance();
-                cachedBalances[keyIdStr] = newBalance;
-            } catch (e: any) {
-                logger.warn(`Aviso: falha ao atualizar saldo pós-venda: ${e.message}`);
+                await updateCachedBalance(keyIdStr, newBalance);
+            } catch (err: any) {
+                logger.warn(`Aviso: falha ao atualizar saldo pós-venda: ${err.message}`);
             }
             
         } catch (err: any) {
@@ -909,31 +952,59 @@ async function watchOrderBookLoop(strategy: any, exchange: ccxt.Exchange) {
 
 async function hydrateOpenPositions() {
     try {
-        const openTrades = await ScalpingTrade.find({ status: { $in: ['in_position', 'entry_pending'] } });
-        let recovered = 0;
-        for (const trade of openTrades) {
-            if (trade.strategyId) {
-                const stratId = trade.strategyId.toString();
-                if (!positions[stratId]) {
-                    positions[stratId] = {
-                        tradeId: trade._id.toString(),
-                        entryPrice: trade.entryPrice || trade.price || 0,
-                        entryTime: trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now(),
-                        amount: trade.amount || 0,
-                        side: trade.type as 'buy' | 'sell',
-                        status: trade.status as 'in_position' | 'entry_pending',
-                        limitBuyOrderId: trade.entryTxid // Necessário para a checagem Maker funcionar após reinício!
-                        // highestPriceReached reinicia zerado. Se o preço ainda estiver bom, ele começa a trail de onde parou.
-                    };
-                    recovered++;
+        let recoveredPositions = 0;
+        let recoveredBalances = 0;
+        
+        if (redisClient) {
+            // Hydrate Positions from Redis
+            const redisPositions = await redisClient.hgetall('hft:positions');
+            for (const stratId in redisPositions) {
+                try {
+                    const pos = JSON.parse(redisPositions[stratId]);
+                    positions[stratId] = pos;
+                    recoveredPositions++;
+                } catch (e) {}
+            }
+            
+            // Hydrate Balances from Redis
+            const redisBalances = await redisClient.hgetall('hft:balances');
+            for (const keyId in redisBalances) {
+                try {
+                    const bal = JSON.parse(redisBalances[keyId]);
+                    cachedBalances[keyId] = bal;
+                    recoveredBalances++;
+                } catch (e) {}
+            }
+            
+            if (recoveredPositions > 0 || recoveredBalances > 0) {
+                logger.info(`♻️ [HYDRATION] Recuperados do Redis: ${recoveredPositions} posições e ${recoveredBalances} saldos!`);
+            }
+        } else {
+            // Fallback for MongoDB se Redis não estiver configurado
+            const openTrades = await ScalpingTrade.find({ status: { $in: ['in_position', 'entry_pending'] } });
+            for (const trade of openTrades) {
+                if (trade.strategyId) {
+                    const stratId = trade.strategyId.toString();
+                    if (!positions[stratId]) {
+                        positions[stratId] = {
+                            tradeId: trade._id.toString(),
+                            entryPrice: trade.entryPrice || trade.price || 0,
+                            entryTime: trade.createdAt ? new Date(trade.createdAt).getTime() : Date.now(),
+                            amount: trade.amount || 0,
+                            side: trade.type as 'buy' | 'sell',
+                            status: trade.status as 'in_position' | 'entry_pending',
+                            limitBuyOrderId: trade.entryTxid
+                        };
+                        recoveredPositions++;
+                    }
                 }
             }
-        }
-        if (recovered > 0) {
-            logger.info(`♻️ [HYDRATION] ${recovered} posições abertas recuperadas do Banco de Dados e reinjetadas na memória do HFT!`);
+            if (recoveredPositions > 0) {
+                logger.info(`♻️ [HYDRATION] ${recoveredPositions} posições abertas recuperadas do MongoDB.`);
+            }
         }
     } catch (e: any) {
-        logger.error(`Falha ao recuperar posições do BD na inicialização: ${e.message}`);
+        logger.error(`Falha ao recuperar estado na inicialização: ${e.message}`);
     }
 }
 
@@ -1028,7 +1099,7 @@ async function startScalpingEngine() {
             try {
                 for (const keyId of Object.keys(exchangeInstances)) {
                     const inst = exchangeInstances[keyId];
-                    cachedBalances[keyId] = await inst.fetchBalance();
+                    await updateCachedBalance(keyId, await inst.fetchBalance());
                 }
             } catch (e: any) {
                 console.error("Erro no loop de sincronização de saldo:", e.message);
