@@ -1035,8 +1035,7 @@ async function startScalpingEngine() {
             }
         }, 15000);
 
-        // Salvar Snapshot do Portfólio a cada 15 minutos (900000 ms)
-        setInterval(async () => {
+        const takeSnapshot = async () => {
             if (!cachedUserId) return;
             try {
                 for (const keyId of Object.keys(exchangeInstances)) {
@@ -1089,7 +1088,13 @@ async function startScalpingEngine() {
             } catch (e: any) {
                 logger.error(`Erro ao salvar PortfolioSnapshot: ${e.message}`);
             }
-        }, 15 * 60 * 1000);
+        };
+
+        // Salvar Snapshot do Portfólio a cada 15 minutos (900000 ms)
+        setInterval(takeSnapshot, 15 * 60 * 1000);
+        
+        // Disparar uma vez após 15 segundos para popular o dashboard imediatamente após o boot (caso esteja vazio)
+        setTimeout(takeSnapshot, 15000);
 
         // Heartbeat para o Dashboard saber que estamos vivos
         let cachedUserId: string | null = null;
