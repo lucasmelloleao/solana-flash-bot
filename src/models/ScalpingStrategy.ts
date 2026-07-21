@@ -21,7 +21,11 @@ const ScalpingStrategySchema = new mongoose.Schema({
     vwap: Number,
     atr: Number,
     statusMessage: String,
-    lastUpdate: Date
+    lastUpdate: Date,
+    priceAction: {
+      recentResistance: Number,
+      distanceToResistancePct: Number
+    }
   }
 }, {
   timestamps: {

@@ -790,7 +790,8 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                         vwap,
                         atr,
                         statusMessage,
-                        lastUpdate: new Date()
+                        lastUpdate: new Date(),
+                        priceAction: trends[stratId].priceAction
                     }
                 }).catch(() => {});
             }
