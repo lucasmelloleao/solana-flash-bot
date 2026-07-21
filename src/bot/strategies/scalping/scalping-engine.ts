@@ -45,6 +45,7 @@ type TrendData = {
     atr: number;
     lastUpdate: number;
     spreadPct?: number;
+    orderBookImbalance?: number;
     priceAction?: {
         recentResistance: number;
         distanceToResistancePct: number;
@@ -382,6 +383,12 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             }
         }
 
+        // --- NOVO: Order Book Imbalance (Pressão Institucional) ---
+        if (trend.orderBookImbalance && trend.orderBookImbalance > 2.5) {
+            // Se tiver 2.5x mais peso de Venda no Livro, aborta! Tem muralha de venda (Spoofing) esmagando a cotação.
+            return;
+        }
+
         (strategy as any).isProcessingTrade = true;
         (strategy as any).processingSince = Date.now();
         try {
@@ -430,10 +437,10 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             // 3. Execução Real
             // Modificado para Maker Entry (pescando no bid)
             const limitBuyPrice = ticker.bid || currentPrice;
-            logger.info(`🚀 HFT MAKER ATIVADO: Pendurando Limit Buy de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
+            logger.info(`🚀 HFT MAKER ATIVADO: Pendurando Limit Buy (Post-Only) de ${formattedAmount} ${strategy.symbol.split('/')[0]} a $${limitBuyPrice.toFixed(4)}...`);
             
             const apiStart = performance.now();
-            const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice);
+            const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice, { postOnly: true });
             const apiEnd = performance.now();
             logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
 
@@ -500,7 +507,16 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         currentSpread = trend.spreadPct;
     }
 
-    const trailingDropTolerance = strategy.takeProfitPercentage * 0.4;
+    // --- NOVO: Take Profit Dinâmico (Esticador de Alvo via ATR) ---
+    let dynamicTakeProfitPct = strategy.takeProfitPercentage;
+    if (trend && trend.atr && position.entryPrice) {
+        const atrPct = (trend.atr / position.entryPrice) * 100;
+        // Se a volatilidade (ATR) for maior que o TP original, a gente afasta o alvo para maximizar lucro
+        // Limitando a um aumento máximo de 2.0x o TP original para não ficar ganancioso demais
+        dynamicTakeProfitPct = Math.max(strategy.takeProfitPercentage, Math.min(strategy.takeProfitPercentage * 2.0, atrPct * 1.5));
+    }
+
+    const trailingDropTolerance = dynamicTakeProfitPct * 0.4;
 
     // Atualiza o rastreamento do preço máximo (pico) para o Trailing Stop
     let newPeak = false;
@@ -512,10 +528,10 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
     // 1. Condição de Take Profit via Trailing Stop
     // Ativa a proteção quando o alvo inicial é batido
-    if (realPnL >= strategy.takeProfitPercentage && !position.trailingActive) {
+    if (realPnL >= dynamicTakeProfitPct && !position.trailingActive) {
         position.trailingActive = true;
         const exitTriggerPrice = position.highestPriceReached * (1 - (trailingDropTolerance / 100));
-        logger.info(`🔥 [TRAILING ATIVADO] Meta de +${strategy.takeProfitPercentage}% atingida (PnL Atual: +${realPnL.toFixed(4)}%). Alvo de saída de segurança em $${exitTriggerPrice.toFixed(4)}`);
+        logger.info(`🔥 [TRAILING ATIVADO] Meta Dinâmica de +${dynamicTakeProfitPct.toFixed(4)}% atingida (PnL Atual: +${realPnL.toFixed(4)}%). Alvo em $${exitTriggerPrice.toFixed(4)}`);
     } else if (position.trailingActive && newPeak) {
         const exitTriggerPrice = position.highestPriceReached * (1 - (trailingDropTolerance / 100));
         logger.info(`📈 [TRAILING ATUALIZADO] Novo pico alcançado ($${position.highestPriceReached.toFixed(4)}). Alvo de saída de segurança subiu para $${exitTriggerPrice.toFixed(4)}`);
@@ -531,9 +547,9 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
     }
 
     // --- NOVO: Break-Even Stop (Ativação) ---
-    if (!position.trailingActive && !position.breakEvenActive && realPnL >= (strategy.takeProfitPercentage * 0.5)) {
+    if (!position.trailingActive && !position.breakEvenActive && realPnL >= (dynamicTakeProfitPct * 0.5)) {
         position.breakEvenActive = true;
-        logger.info(`🛡️ [BREAK-EVEN ATIVADO] PnL bateu +${realPnL.toFixed(4)}% (Metade do Alvo na CEX). Risco zerado!`);
+        logger.info(`🛡️ [BREAK-EVEN ATIVADO] PnL bateu +${realPnL.toFixed(4)}% (Metade do Alvo Dinâmico na CEX). Risco zerado!`);
     }
 
     // 2. Condição de Stop Loss Dinâmico
@@ -732,8 +748,9 @@ async function watchStrategyLoop(strategy: any) {
     const stratId = strategy._id.toString();
     runningLoops[stratId] = true;
 
-    // Lança o Rastreador de Tendências em paralelo, garantindo que a exchange existe
+    // Lança os rastreadores de background em paralelo
     watchTrendLoop(strategy, exchange).catch(e => logger.error(`Erro no Trend Loop para ${strategy.symbol}: ${e.message}`));
+    watchOrderBookLoop(strategy, exchange).catch(e => logger.error(`Erro no OrderBook Loop para ${strategy.symbol}: ${e.message}`));
 
     while (isRunning && runningLoops[stratId]) {
         try {
@@ -858,6 +875,34 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
         
         // Dorme por 30 segundos antes de checar as velas novamente
         await new Promise(res => setTimeout(res, 30000));
+    }
+}
+
+async function watchOrderBookLoop(strategy: any, exchange: ccxt.Exchange) {
+    const stratId = strategy._id.toString();
+    while (isRunning && runningLoops[stratId]) {
+        try {
+            let ob;
+            if (exchange.has['watchOrderBook']) {
+                ob = await (exchange as any).watchOrderBook(strategy.symbol, 20);
+            } else {
+                ob = await exchange.fetchOrderBook(strategy.symbol, 20);
+                await new Promise(res => setTimeout(res, 2000)); // Dorme se for REST
+            }
+
+            if (ob && ob.bids && ob.asks) {
+                const bidVol = ob.bids.slice(0, 10).reduce((sum: number, bid: any) => sum + (bid[1] || 0), 0);
+                const askVol = ob.asks.slice(0, 10).reduce((sum: number, ask: any) => sum + (ask[1] || 0), 0);
+                if (bidVol > 0 && askVol > 0) {
+                    const imbalance = askVol / bidVol; // Se for 3.0, tem 3x mais peso de vendedores
+                    if (!trends[stratId]) trends[stratId] = {} as any;
+                    trends[stratId].orderBookImbalance = imbalance;
+                }
+            }
+        } catch (e: any) {
+            // Em caso de erro na assinatura, espera um pouco para não floodar logs
+            await new Promise(res => setTimeout(res, 5000));
+        }
     }
 }
 
