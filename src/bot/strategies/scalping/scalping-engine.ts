@@ -5,13 +5,20 @@ import BotStatus from '../../../models/BotStatus';
 import { decryptSecretKey } from '../../../utils/encryption';
 import * as ccxt from 'ccxt';
 import Redis from 'ioredis';
+import pino from 'pino';
 
-const logger = {
-    info: (msg: string, obj?: any) => console.log(`\n[INFO] ${msg}`, obj || ''),
-    warn: (msg: string, obj?: any) => console.warn(`\n[WARN] ${msg}`, obj || ''),
-    error: (msg: string, obj?: any) => console.error(`\n[ERROR] ${msg}`, obj || ''),
-    debug: (msg: string, obj?: any) => console.log(`\n[DEBUG] ${msg}`, obj || ''),
-};
+const logger = pino({
+    level: 'debug',
+    transport: {
+        target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname',
+            messageFormat: '{msg}'
+        }
+    }
+});
 
 let activeStrategies: any[] = [];
 let isRunning = false;
@@ -244,8 +251,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
     // Timeout de segurança para evitar que o robô trave se a exchange não responder
     if ((strategy as any).isProcessingTrade) {
         const processingSince = (strategy as any).processingSince || 0;
-        if (Date.now() - processingSince > 10000) {
-            logger.warn(`[DEBUG] Resetando isProcessingTrade travado há mais de 10s para ${strategy.name}`);
+        if (Date.now() - processingSince > 2000) {
+            logger.warn(`[DEBUG] Resetando isProcessingTrade travado há mais de 2s para ${strategy.name}`);
             (strategy as any).isProcessingTrade = false;
         } else {
             return;
