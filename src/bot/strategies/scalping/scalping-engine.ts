@@ -44,6 +44,10 @@ type TrendData = {
     atr: number;
     lastUpdate: number;
     spreadPct?: number;
+    priceAction?: {
+        recentResistance: number;
+        distanceToResistancePct: number;
+    };
 };
 const trends: Record<string, TrendData> = {};
 
@@ -353,6 +357,15 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
         if (trend.vwap && currentPrice < trend.vwap) {
             // Segurança: Só comprar se o preço estiver acima da VWAP (tendência compradora validada pelo volume)
             return;
+        }
+
+        // --- NOVO: PRICE ACTION (Resistência) ---
+        if (trend.priceAction) {
+            // Se estivermos muito perto de uma resistência recente (ex: a menos de 0.05% do topo das últimas 30 velas)
+            // Aborta a compra para evitar comprar exatamente no topo e sofrer rejeição imediata.
+            if (trend.priceAction.distanceToResistancePct > 0 && trend.priceAction.distanceToResistancePct < 0.05) {
+                return; 
+            }
         }
 
         (strategy as any).isProcessingTrade = true;
@@ -706,6 +719,15 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                 
                 const isUptrend = ema9 > ema21;
                 
+                // --- NOVO: PRICE ACTION (Resistência) ---
+                let recentResistance = 0;
+                for (let i = 0; i < ohlcv.length - 1; i++) { // -1 ignora a vela atual aberta
+                    const high = Number(ohlcv[i][2]);
+                    if (high > recentResistance) recentResistance = high;
+                }
+                const currentPrice = closes[closes.length - 1]; // Fechamento da última vela consolidada
+                const distanceToResistancePct = currentPrice > 0 ? ((recentResistance - currentPrice) / currentPrice) * 100 : 0;
+                
                 // Atualiza a memória de tendência global
                 trends[stratId] = {
                     isUptrend,
@@ -714,7 +736,11 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                     rsi,
                     vwap,
                     atr,
-                    lastUpdate: Date.now()
+                    lastUpdate: Date.now(),
+                    priceAction: {
+                        recentResistance,
+                        distanceToResistancePct
+                    }
                 };
 
                 let spreadLog = 'Desconhecido';
