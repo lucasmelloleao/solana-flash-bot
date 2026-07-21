@@ -51,6 +51,8 @@ type OpenPosition = {
     highestPriceReached?: number;
     trailingActive?: boolean;
     breakEvenActive?: boolean;
+    realPnL?: number;
+    currentExitPrice?: number;
 };
 const positions: Record<string, OpenPosition> = {};
 
@@ -537,7 +539,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 const apiStart = performance.now();
                 const order = await exchange.createLimitBuyOrder(strategy.symbol, formattedAmount, limitBuyPrice, { postOnly: true });
                 const apiEnd = performance.now();
-                logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
+                // logger.debug(`⚡ [LATÊNCIA CIRÚRGICA API] Disparo da ordem para a Exchange levou ${(apiEnd - apiStart).toFixed(2)}ms`);
 
                 // Subtrair otimisticamente do saldo em memória para evitar que o próximo tick compre novamente antes do update de 15s
                 if (cachedBalances[keyIdStr]?.free?.[quoteAsset]) {
