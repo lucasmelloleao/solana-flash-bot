@@ -866,6 +866,62 @@ async function startScalpingEngine() {
             }
         }, 15000);
 
+        // Salvar Snapshot do Portfólio a cada 15 minutos (900000 ms)
+        setInterval(async () => {
+            if (!cachedUserId) return;
+            try {
+                for (const keyId of Object.keys(exchangeInstances)) {
+                    const inst = exchangeInstances[keyId];
+                    const balance = cachedBalances[keyId];
+                    if (!balance || !balance.total) continue;
+
+                    let totalUsdValue = 0;
+                    const assetBalances = [];
+
+                    for (const asset of Object.keys(balance.total)) {
+                        const total = balance.total[asset];
+                        if (total <= 0) continue;
+
+                        let usdValue = 0;
+                        if (asset === 'USDT' || asset === 'USDC') {
+                            usdValue = total;
+                        } else {
+                            try {
+                                const ticker = await inst.fetchTicker(`${asset}/USDT`);
+                                if (ticker && ticker.last) {
+                                    usdValue = total * ticker.last;
+                                }
+                            } catch (e) {
+                                // Ignore assets without USDT pair or if fetch fails
+                            }
+                        }
+
+                        totalUsdValue += usdValue;
+                        assetBalances.push({
+                            asset,
+                            free: balance.free[asset] || 0,
+                            used: balance.used[asset] || 0,
+                            total,
+                            usdValue
+                        });
+                    }
+
+                    if (totalUsdValue > 0) {
+                        const PortfolioSnapshot = (await import('../../../models/PortfolioSnapshot')).default;
+                        await PortfolioSnapshot.create({
+                            userId: cachedUserId,
+                            exchange: inst.id,
+                            totalUsdValue,
+                            balances: assetBalances
+                        });
+                        logger.info(`📸 Snapshot salvo para ${inst.id}: $${totalUsdValue.toFixed(2)}`);
+                    }
+                }
+            } catch (e: any) {
+                logger.error(`Erro ao salvar PortfolioSnapshot: ${e.message}`);
+            }
+        }, 15 * 60 * 1000);
+
         // Heartbeat para o Dashboard saber que estamos vivos
         let cachedUserId: string | null = null;
         setInterval(async () => {
