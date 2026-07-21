@@ -255,8 +255,8 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
             } else if (fetchedOrder.status === 'open') {
                 const elapsed = Date.now() - position.entryTime;
-                if (elapsed > 5000) { // 5 segundos de timeout (Reprecificação Adaptativa)
-                    logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou após 5s. Cancelando para reposicionar...`);
+                if (elapsed > 10000) { // 10 segundos de timeout (Reprecificação Adaptativa)
+                    logger.info(`⏳ Ordem Maker Entry (${position.limitBuyOrderId}) expirou após 10s. Cancelando para reposicionar...`);
                     try {
                         await exchange.cancelOrder(position.limitBuyOrderId, strategy.symbol);
                     } catch (cancelErr) {
@@ -283,7 +283,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                                 status: 'in_position',
                                 entryTxid: position.limitBuyOrderId,
                                 entryTime: new Date(position.entryTime),
-                                errorMessage: 'Preenchimento Parcial (Timeout 5s)'
+                                errorMessage: 'Preenchimento Parcial (Timeout 10s)'
                             });
                             position.tradeId = tradeDoc._id.toString();
                         } else {
@@ -291,7 +291,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                                 status: 'in_position', 
                                 entryPrice: position.entryPrice,
                                 amount: position.amount,
-                                errorMessage: 'Preenchimento Parcial (Timeout 5s)',
+                                errorMessage: 'Preenchimento Parcial (Timeout 10s)',
                                 entryTime: new Date(position.entryTime)
                             });
                         }
