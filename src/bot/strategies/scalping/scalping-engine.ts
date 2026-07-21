@@ -32,6 +32,7 @@ type OpenPosition = {
     limitBuyOrderId?: string;
     highestPriceReached?: number;
     trailingActive?: boolean;
+    breakEvenActive?: boolean;
 };
 const positions: Record<string, OpenPosition> = {};
 
@@ -528,8 +529,15 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             exitReason = 'TRAILING_STOP_PROFIT';
         }
     }
-    // 2. Condição de Stop Loss Dinâmico (Usando ATR)
-    else {
+
+    // --- NOVO: Break-Even Stop (Ativação) ---
+    if (!position.trailingActive && !position.breakEvenActive && realPnL >= (strategy.takeProfitPercentage * 0.5)) {
+        position.breakEvenActive = true;
+        logger.info(`🛡️ [BREAK-EVEN ATIVADO] PnL bateu +${realPnL.toFixed(4)}% (Metade do Alvo na CEX). Risco zerado!`);
+    }
+
+    // 2. Condição de Stop Loss Dinâmico
+    if (!shouldExit && !position.trailingActive) {
         let dynamicStopLossPct = strategy.stopLossPercentage;
         if (trend && trend.atr && position.entryPrice) {
             const atrPct = (trend.atr / position.entryPrice) * 100;
@@ -537,9 +545,22 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             dynamicStopLossPct = Math.max(absoluteFloor, Math.min(strategy.stopLossPercentage, atrPct * 3.0));
         }
 
+        // --- NOVO: Time-Decay Stop (Encolhimento do Stop por Tempo) ---
+        const timeRatio = Math.min(1.0, timeElapsedMs / strategy.maxPositionTimeMs);
+        if (timeRatio > 0.5 && !position.breakEvenActive) {
+            // Após 50% do tempo máximo, o stop começa a subir em direção a zero
+            const decayFactor = Math.max(0, 1 - ((timeRatio - 0.5) / 0.5));
+            dynamicStopLossPct = dynamicStopLossPct * decayFactor;
+        }
+
+        // --- NOVO: Aplicação do Break-Even ---
+        if (position.breakEvenActive) {
+            dynamicStopLossPct = 0.00; // Zero a Zero absoluto
+        }
+
         if (realPnL <= -dynamicStopLossPct) {
             shouldExit = true;
-            exitReason = 'STOP_LOSS (ATR_DYNAMIC)';
+            exitReason = position.breakEvenActive ? 'BREAK_EVEN_STOP' : (timeRatio > 0.5 ? 'TIME_DECAY_STOP' : 'STOP_LOSS (ATR_DYNAMIC)');
         }
         // 3. Condição de Timeout (Max Tempo Posicionado)
         else if (timeElapsedMs >= strategy.maxPositionTimeMs) {
