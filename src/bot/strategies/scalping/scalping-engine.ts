@@ -350,6 +350,14 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
             // Ignora o tick se o mercado não estiver validado como Tendência de Alta
             return;
         }
+
+        if (trend.ema9 && currentPrice < trend.ema9) {
+            // Filtro Faca Caindo: A média móvel é "atrasada". Se derreter uma vela gigante vermelha, 
+            // a EMA9 ainda demora a cair. Esse filtro bloqueia a compra se o preço atual já estiver 
+            // abaixo da EMA9, evitando comprar no meio de um dump.
+            return;
+        }
+
         if (trend.rsi >= 70) {
             // Ignora o tick se o ativo estiver esticado/sobrecomprado (risco de queda iminente)
             return;
