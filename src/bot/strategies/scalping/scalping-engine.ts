@@ -50,6 +50,7 @@ type TrendData = {
     };
 };
 const trends: Record<string, TrendData> = {};
+const cooldowns: Record<string, number> = {};
 
 // EMA Math Helper
 function calculateEMA(prices: number[], period: number): number {
@@ -390,6 +391,12 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                     return; 
                 }
 
+                if (cooldowns[stratId] && Date.now() < cooldowns[stratId]) {
+                    // Robô está em cooldown anti-violinada (esperando a poeira baixar)
+                    (strategy as any).isProcessingTrade = false;
+                    return;
+                }
+
                 const quoteAsset = strategy.symbol.split('/')[1];
                 const keyIdStr = strategy.exchangeKeyId._id.toString();
                 const balance = cachedBalances[keyIdStr];
@@ -623,6 +630,17 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
             // Limpar a posição
             delete positions[stratId];
+
+            // --- NOVO: COOLDOWN ANTI-VIOLINADA ---
+            if (finalPnl < 0) {
+                // Se foi LOSS (Stop Loss), o mercado provavelmente está num caixote ou a tendência esgotou.
+                // Congela a estratégia por 5 minutos para a "poeira baixar" e as médias móveis limparem.
+                cooldowns[stratId] = Date.now() + 5 * 60 * 1000;
+                logger.info(`❄️ [COOLDOWN] Estratégia ${strategy.symbol} pausada por 5 minutos após um Loss, para evitar violinada no caixote.`);
+            } else {
+                // Se foi GAIN, pausa por apenas 30 segundos para evitar reentrar loucamente no mesmo topo.
+                cooldowns[stratId] = Date.now() + 30 * 1000;
+            }
 
             // 4. Atualizar o saldo real após a venda
             // Em vez de atualizar otimisticamente (o que pode causar Insufficient Position se a ordem Limit não filar tudo),
