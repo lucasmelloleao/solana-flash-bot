@@ -86,6 +86,41 @@ type TrendData = {
 const trends: Record<string, TrendData> = {};
 const cooldowns: Record<string, number> = {};
 
+// Circuit Breaker: Daily Loss Tracking
+const dailyLossUsd: Record<string, number> = {};
+const dailyLossResetTime: Record<string, number> = {};
+
+function checkAndResetDailyLoss(userId: string) {
+    const now = Date.now();
+    const lastReset = dailyLossResetTime[userId] || 0;
+    const midnightToday = new Date();
+    midnightToday.setHours(0, 0, 0, 0);
+    if (lastReset < midnightToday.getTime()) {
+        dailyLossUsd[userId] = 0;
+        dailyLossResetTime[userId] = now;
+        logger.info(`🔄 [CIRCUIT BREAKER] Contador de perda diária resetado para userId: ${userId}`);
+    }
+}
+
+function accumulateDailyLoss(userId: string, lossUsd: number) {
+    checkAndResetDailyLoss(userId);
+    dailyLossUsd[userId] = (dailyLossUsd[userId] || 0) + lossUsd;
+    logger.warn(`⚠️ [CIRCUIT BREAKER] Perda acumulada no dia: $${dailyLossUsd[userId].toFixed(2)}`);
+}
+
+function isDailyLossBreached(strategy: any): boolean {
+    if (!strategy.dailyLossLimit || strategy.dailyLossLimit <= 0) return false;
+    const userId = strategy.userId?.toString();
+    if (!userId) return false;
+    checkAndResetDailyLoss(userId);
+    const currentLoss = dailyLossUsd[userId] || 0;
+    if (currentLoss >= strategy.dailyLossLimit) {
+        logger.warn(`🛑 [CIRCUIT BREAKER] Limite diário de $${strategy.dailyLossLimit} atingido! Perda acumulada: $${currentLoss.toFixed(2)}. Motor pausado para ${strategy.name}.`);
+        return true;
+    }
+    return false;
+}
+
 // EMA Math Helper
 function calculateEMA(prices: number[], period: number): number {
     if (prices.length < period) return prices[prices.length - 1] || 0;
@@ -211,7 +246,7 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
             enableRateLimit: false, // DESLIGADO PARA HFT: A trava padrão do CCXT estava enfileirando as ordens e gerando delay de 3 segundos
             options: {
                 adjustForTimeDifference: true,
-                recvWindow: 60000,
+                recvWindow: 5000,
             }
         });
 
@@ -296,6 +331,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 }
                 
                 logger.info(`✅ [MAKER FILL] Ordem Limit Buy preenchida a $${position.entryPrice.toFixed(4)}. ID: ${position.tradeId}`);
+                await setPosition(stratId, position); // Sync updated state to Redis
             } else if (fetchedOrder.status === 'open') {
                 const elapsed = Date.now() - position.entryTime;
                 if (elapsed > 10000) { // 10 segundos de timeout (Reprecificação Adaptativa)
@@ -338,6 +374,7 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                                 entryTime: new Date(position.entryTime)
                             });
                         }
+                        await setPosition(stratId, position); // Sync partial fill state to Redis
                     } else {
                         if (position.tradeId) await ScalpingTrade.findByIdAndUpdate(position.tradeId, { status: 'failed', errorMessage: 'Entry timeout (Zero fill)' });
                         await removePosition(stratId);
@@ -357,6 +394,11 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
     if (!position) {
         // Se a estratégia foi pausada pelo usuário, nós apenas observamos, não compramos
         if (!strategy.active) {
+            return;
+        }
+
+        // Circuit Breaker: verificar limite de perda diária antes de qualquer nova entrada
+        if (isDailyLossBreached(strategy)) {
             return;
         }
 
@@ -505,6 +547,11 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
 
                 // 4. Salvar apenas em memória como intenção (pendente) para evitar lixo no DB
                 const finalPos = { ...lockPos, limitBuyOrderId: order.id || order.info?.id || order.clientOrderId };
+                if (!finalPos.limitBuyOrderId) {
+                    logger.error(`❌ [LOCK] Corretora não retornou ID da ordem para ${strategy.name}. Liberando lock.`);
+                    if (redisClient) await redisClient.hdel('hft:positions', stratId);
+                    throw new Error('Ordem sem ID retornada pela corretora.');
+                }
                 await setPosition(stratId, finalPos);
 
                 logger.info(`✅ [INTENÇÃO REGISTRADA] Ordem Limit aguardando fill a $${limitBuyPrice.toFixed(4)}.`);
@@ -678,6 +725,16 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                     sellAmount = Number(exchange.amountToPrecision(strategy.symbol, position.amount));
                 }
 
+                // Minimum order size guard
+                if (exchange.markets?.[strategy.symbol]) {
+                    const minAmount = (exchange.markets[strategy.symbol] as any)?.limits?.amount?.min || 0;
+                    if (sellAmount < minAmount && minAmount > 0) {
+                        logger.warn(`⚠️ [MIN SIZE] Qtd ${sellAmount} abaixo do mínimo ${minAmount}. Descartando posição residual.`);
+                        await removePosition(stratId);
+                        return;
+                    }
+                }
+
                 const safeBufferSell = Math.max(strategy.bufferPercentage, 0.1); 
                 const limitSellPrice = currentPrice * (1 - (safeBufferSell / 100));
                 
@@ -741,10 +798,13 @@ async function processTick(ticker: ccxt.Ticker, strategy: any, exchange: ccxt.Ex
                 // Limpar a posição
                 await removePosition(stratId);
 
-                // --- NOVO: COOLDOWN ANTI-VIOLINADA ---
+                // --- NOVO: COOLDOWN ANTI-VIOLINADA (configurável via Dashboard) ---
                 if (finalPnl < 0) {
-                    cooldowns[stratId] = Date.now() + 5 * 60 * 1000;
-                    logger.info(`❄️ [COOLDOWN] Estratégia ${strategy.symbol} pausada por 5 minutos após um Loss, para evitar violinada no caixote.`);
+                    const lossUsd = Math.abs((finalExitPrice - position.entryPrice) * soldAmount);
+                    accumulateDailyLoss(strategy.userId?.toString() || '', lossUsd);
+                    const cooldownMs = strategy.postLossCooldownMs || 5 * 60 * 1000;
+                    cooldowns[stratId] = Date.now() + cooldownMs;
+                    logger.info(`❄️ [COOLDOWN] Estratégia ${strategy.symbol} pausada por ${(cooldownMs / 60000).toFixed(0)}min após um Loss. ($${lossUsd.toFixed(2)})`);
                 } else {
                     cooldowns[stratId] = Date.now() + 30 * 1000;
                 }
@@ -879,15 +939,9 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
                     }
                 };
 
-                let spreadLog = 'Desconhecido';
-                let spreadPct = 0;
-                try {
-                    const t = await exchange.fetchTicker(strategy.symbol);
-                    if (t.bid && t.ask) {
-                        spreadPct = ((t.ask - t.bid) / t.bid) * 100;
-                        spreadLog = `${spreadPct.toFixed(3)}% (Bid:$${t.bid} Ask:$${t.ask})`;
-                    }
-                } catch(e) {}
+                // Reutiliza o spread já capturado pelo WebSocket ticker para evitar chamada REST extra
+                let spreadPct = trends[stratId]?.spreadPct || 0;
+                let spreadLog = spreadPct > 0 ? `${spreadPct.toFixed(3)}% (via WebSocket)` : 'Desconhecido';
 
                 // Atualiza o spreadPct na memória também
                 trends[stratId].spreadPct = spreadPct;
@@ -924,8 +978,8 @@ async function watchTrendLoop(strategy: any, exchange: ccxt.Exchange) {
             logger.error(`Aviso: falha ao buscar tendência para ${strategy.symbol}: ${err.message}`);
         }
         
-        // Dorme por 30 segundos antes de checar as velas novamente
-        await new Promise(res => setTimeout(res, 30000));
+        // Dorme por 15 segundos antes de checar as velas novamente
+        await new Promise(res => setTimeout(res, 15000));
     }
 }
 
@@ -1027,9 +1081,9 @@ async function cleanupFailedTrades() {
 }
 
 async function startScalpingEngine() {
-    console.log('\n======================================================');
-    console.log('⚡ INICIANDO MOTOR HFT DE SCALPING (WEBSOCKETS CCXT PRO)');
-    console.log('======================================================\n');
+    logger.info('======================================================');
+    logger.info('⚡ INICIANDO MOTOR HFT DE SCALPING (WEBSOCKETS CCXT PRO)');
+    logger.info('======================================================');
 
     try {
         await DatabaseService.connect();
@@ -1098,7 +1152,7 @@ async function startScalpingEngine() {
             try {
                 await cleanupFailedTrades();
             } catch (e) {
-                console.error("Erro no loop de limpeza de trades:", e);
+                logger.error('Erro no loop de limpeza de trades: ' + e);
             }
         }, 15000);
 
@@ -1109,7 +1163,7 @@ async function startScalpingEngine() {
                     await updateCachedBalance(keyId, await inst.fetchBalance());
                 }
             } catch (e: any) {
-                console.error("Erro no loop de sincronização de saldo:", e.message);
+                logger.error('Erro no loop de sincronização de saldo: ' + e.message);
             }
         }, 15000);
 
@@ -1199,7 +1253,7 @@ async function startScalpingEngine() {
         }, 5000);
 
     } catch (err) {
-        console.error('❌ Falha ao iniciar scalping bot:', err);
+        logger.error('❌ Falha ao iniciar scalping bot: ' + err);
         process.exit(1);
     }
 }

@@ -11,6 +11,8 @@ const ScalpingStrategySchema = new mongoose.Schema({
   maxSpreadPercentage: { type: Number, default: 0.1 },
   maxPositionTimeMs: { type: Number, default: 30000 },
   bufferPercentage: { type: Number, default: 0.01 },
+  dailyLossLimit: { type: Number, default: 0 },
+  postLossCooldownMs: { type: Number, default: 300000 },
   active: { type: Boolean, default: true },
   currentTrend: {
     isUptrend: Boolean,
