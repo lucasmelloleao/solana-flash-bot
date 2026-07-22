@@ -261,6 +261,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
         global.lastSpreadUsdc = spreadUsdc;
         global.lastSpreadPct = spreadPct;
         global.lastCheckedStrategy = strategy.name;
+        (global as any).lastExecutionTimeMs = Date.now() - now;
 
         // Log de "SEM OPORTUNIDADE" removido para limpar o terminal e liberar o Event Loop para atirar mais rápido
         if (profit >= (minProfit * 1e6)) {
@@ -684,6 +685,6 @@ startEngine();
 // para não gastar CPU nem travar o Event Loop.
 setInterval(() => {
     if (activeTargetPools && activeTargetPools.length > 0 && (global as any).lastCheckedStrategy) {
-        process.stdout.write(`\r🤖 [Motor WSS] Furtividade Ativa. Escaneando ${activeTargetPools.length} pools. Última distorção [${(global as any).lastCheckedStrategy}]: $${(global as any).lastSpreadUsdc} (${(global as any).lastSpreadPct}%)       `);
+        process.stdout.write(`\r🤖 [Motor WSS] Furtividade Ativa. Escaneando ${activeTargetPools.length} pools. Última distorção [${(global as any).lastCheckedStrategy}]: $${(global as any).lastSpreadUsdc} (${(global as any).lastSpreadPct}%) | Levou: ${(global as any).lastExecutionTimeMs}ms       `);
     }
 }, 2000);
