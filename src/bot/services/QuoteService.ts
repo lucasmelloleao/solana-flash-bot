@@ -1,5 +1,6 @@
 import axios from 'axios';
 import https from 'https';
+import redisClient from './RedisService';
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 10, scheduling: 'fifo' });
 const jupApiUrl = process.env.JUPITER_URL || 'https://quote-api.jup.ag/v6';
@@ -10,17 +11,31 @@ const raptorApi = axios.create({ baseURL: 'https://raptor-beta.solanatracker.io'
 export class QuoteService {
     static async fetchSolPriceUsdc(): Promise<number> {
         try {
+            if (redisClient) {
+                const cached = await redisClient.get('cache:sol_price');
+                if (cached) return parseFloat(cached);
+            }
             const res = await axios.get('https://lite-api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112', { httpsAgent, timeout: 3000 });
             const data = res.data?.['So11111111111111111111111111111111111111112'];
-            if (data && data.usdPrice) return parseFloat(data.usdPrice);
+            if (data && data.usdPrice) {
+                const price = parseFloat(data.usdPrice);
+                if (redisClient) await redisClient.set('cache:sol_price', price.toString(), 'EX', 15);
+                return price;
+            }
         } catch (err) { }
         return 150; // Fallback
     }
 
     static async getQuotes(tokenMint: string, borrowAmount: number, useRaptor: boolean) {
         const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-        let quoteA, quoteB;
+        const cacheKey = `cache:quote:${tokenMint}:${borrowAmount}:${useRaptor}`;
+        
+        if (redisClient) {
+            const cached = await redisClient.get(cacheKey);
+            if (cached) return JSON.parse(cached);
+        }
 
+        let quoteA, quoteB;
         try {
             if (useRaptor) {
                 const quoteARes = await raptorApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=50`);
@@ -37,7 +52,11 @@ export class QuoteService {
             }
             if (!quoteB) return null;
 
-            return { quoteA, quoteB };
+            const result = { quoteA, quoteB };
+            if (redisClient) {
+                await redisClient.set(cacheKey, JSON.stringify(result), 'PX', 500); // 500ms cache para evitar bombardear a API
+            }
+            return result;
         } catch (error) {
             console.log('QuoteService: getQuotes error', error)
             throw error;

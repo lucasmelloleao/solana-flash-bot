@@ -12,6 +12,7 @@ import { getSolendPoolConfig } from '../../config/solend-pools';
 import { getKaminoPoolConfig } from '../../config/kamino-pools';
 import FlashLoanTrade from '../../../models/FlashLoanTrade';
 import { getTargetPools } from '../../config/target-pools';
+import redisClient from '../../services/RedisService';
 const SystemStatus = require('../../../models/SystemStatus').default || require('../../../models/SystemStatus');
 
 // Logger Mock
@@ -182,8 +183,13 @@ async function runSingleStrategyArbitrage(strategy: any) {
     const stratId = strategy._id.toString();
 
     // Lock por estratégia: evita execução concorrente da mesma estratégia em ciclos sobrepostos
-    if (strategyAnalyzingMap.get(stratId)) return;
-    strategyAnalyzingMap.set(stratId, true);
+    if (redisClient) {
+        const locked = await redisClient.set(`lock:strategy:${stratId}`, '1', 'PX', 5000, 'NX');
+        if (!locked) return;
+    } else {
+        if (strategyAnalyzingMap.get(stratId)) return;
+        strategyAnalyzingMap.set(stratId, true);
+    }
 
     try {
         if (strategy.temporary) {
@@ -212,7 +218,13 @@ async function runSingleStrategyArbitrage(strategy: any) {
         const providerKey = useRaptor ? 'raptor' : 'jupiter';
 
         // Penalidade por provider: um 429 do Raptor não bloqueia estratégias que usam Jupiter
-        if (providerPenaltyUntil[providerKey] > Date.now()) return;
+        let isPenalized = false;
+        if (redisClient) {
+            isPenalized = (await redisClient.exists(`penalty:provider:${providerKey}`)) === 1;
+        } else {
+            isPenalized = providerPenaltyUntil[providerKey] > Date.now();
+        }
+        if (isPenalized) return;
 
         const quotes = await QuoteService.getQuotes(strategy.tokenBMint, BORROW_AMOUNT, useRaptor);
         if (!quotes) {
@@ -253,12 +265,20 @@ async function runSingleStrategyArbitrage(strategy: any) {
 
             // Rate limit para registros simulados — evita centenas de trades/hora poluindo o banco de dados
             if (botMode !== 'live') {
-                const lastSaved = simulatedTradeLastSaved.get(stratId) || 0;
-                if (Date.now() - lastSaved < SIMULATED_SAVE_INTERVAL_MS) {
-                    logger.info({ profitUsdc: (profit / 1e6).toFixed(4) }, '💰 OPORTUNIDADE SIMULADA (rate-limited — aguardando janela de 5min para salvar no DB)');
-                    return;
+                if (redisClient) {
+                    const locked = await redisClient.set(`limit:simulated:${stratId}`, '1', 'PX', SIMULATED_SAVE_INTERVAL_MS, 'NX');
+                    if (!locked) {
+                        logger.info({ profitUsdc: (profit / 1e6).toFixed(4) }, '💰 OPORTUNIDADE SIMULADA (rate-limited pelo Redis — aguardando janela)');
+                        return;
+                    }
+                } else {
+                    const lastSaved = simulatedTradeLastSaved.get(stratId) || 0;
+                    if (Date.now() - lastSaved < SIMULATED_SAVE_INTERVAL_MS) {
+                        logger.info({ profitUsdc: (profit / 1e6).toFixed(4) }, '💰 OPORTUNIDADE SIMULADA (rate-limited — aguardando janela de 5min para salvar no DB)');
+                        return;
+                    }
+                    simulatedTradeLastSaved.set(stratId, Date.now());
                 }
-                simulatedTradeLastSaved.set(stratId, Date.now());
             }
 
             const tradeLog = await FlashLoanTrade.create({
@@ -356,14 +376,22 @@ async function runSingleStrategyArbitrage(strategy: any) {
         } else if (status === 429) {
             // Penalidade por provider específico — não afeta o provider alternativo
             const penalizedProvider = strategy.provider === 'raptor' ? 'raptor' : 'jupiter';
-            providerPenaltyUntil[penalizedProvider] = Date.now() + 15000;
+            if (redisClient) {
+                await redisClient.set(`penalty:provider:${penalizedProvider}`, '1', 'PX', 15000);
+            } else {
+                providerPenaltyUntil[penalizedProvider] = Date.now() + 15000;
+            }
             logger.warn(`Rate Limit 429 detectado no provider '${penalizedProvider}'. Penalidade de 15s aplicada (outros providers NÃO afetados).`);
         } else {
             logger.error(`Erro ignorado durante a busca de cotações: ${err.message || err}`);
         }
     } finally {
         // Libera o lock da estratégia — sempre executa, independente de sucesso ou erro
-        strategyAnalyzingMap.set(stratId, false);
+        if (redisClient) {
+            await redisClient.del(`lock:strategy:${stratId}`);
+        } else {
+            strategyAnalyzingMap.set(stratId, false);
+        }
     }
 }
 
@@ -536,6 +564,11 @@ async function restartExecutionEngine() {
 }
 
 async function checkPendingTransactions() {
+    if (redisClient) {
+        const locked = await redisClient.set('lock:pending_tx_poller', '1', 'PX', 25000, 'NX');
+        if (!locked) return;
+    }
+
     try {
         const pendingTrades = await FlashLoanTrade.find({ status: 'pending', txid: { $exists: true, $ne: null } });
         if (pendingTrades.length === 0) return;
