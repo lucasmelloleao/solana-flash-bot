@@ -183,11 +183,10 @@ async function runSingleStrategyArbitrage(strategy: any) {
     const stratId = strategy._id.toString();
     const now = Date.now();
 
-    // Throttle (Limitador): Impede que a MESMA estratégia ative mais de 1 vez por segundo, 
-    // mesmo que haja dezenas de eventos WSS naquele segundo.
-    // Assim que der 1 segundo, o próximo WSS acionará imediatamente (latência zero).
+    // Throttle (Limitador) agressivo: 200ms (5 execuções por estratégia por segundo)
+    // Usando todo o poder do plano Developer de 10 req/s da Jupiter
     const lastRun = lastStrategyRunTimes.get(stratId) || 0;
-    if (now - lastRun < 1000) return; // 1000ms = 1 requisição por estratégia por segundo.
+    if (now - lastRun < 200) return; // 200ms throttle para agredir o mercado
     lastStrategyRunTimes.set(stratId, now);
 
     // Lock por estratégia: evita execução concorrente da mesma estratégia em ciclos sobrepostos
@@ -331,26 +330,43 @@ async function runSingleStrategyArbitrage(strategy: any) {
                             await tradeLog.save();
                             logger.info({ txid: result.txid, bundleId: result.jitoBundleId, expectedProfit: (profit / 1e6).toFixed(4) }, '🚀 TRANSAÇÃO ENVIADA COM SUCESSO (Aguardando confirmação...)');
                             
-                            // Checagem assíncrona de confirmação de lucro
+                            // Checagem assíncrona de confirmação de lucro usando HTTP Polling silencioso
                             SolanaService.getConnection().then(async conn => {
                                 try {
-                                    const latestBlockhash = await conn.getLatestBlockhash('confirmed');
-                                    const confirmation = await conn.confirmTransaction({
-                                        signature: result.txid,
-                                        blockhash: latestBlockhash.blockhash,
-                                        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-                                    }, 'confirmed');
+                                    let confirmed = false;
+                                    let failed = false;
+                                    let errContent = null;
                                     
-                                    if (confirmation.value.err) {
-                                        logger.error({ txid: result.txid, err: confirmation.value.err }, '❌ TRANSAÇÃO FALHOU NA REDE (Revertida)');
+                                    // Faz polling a cada 2 segundos, no máximo 15 vezes (30 segundos)
+                                    for (let i = 0; i < 15; i++) {
+                                        await new Promise(r => setTimeout(r, 2000));
+                                        const status = await conn.getSignatureStatus(result.txid);
+                                        
+                                        if (status && status.value) {
+                                            if (status.value.err) {
+                                                failed = true;
+                                                errContent = status.value.err;
+                                                break;
+                                            } else if (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized') {
+                                                confirmed = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (failed) {
+                                        logger.error({ txid: result.txid, err: errContent }, '❌ TRANSAÇÃO FALHOU NA REDE (Revertida)');
                                         await FlashLoanTrade.deleteOne({ _id: tradeLog._id });
-                                    } else {
+                                    } else if (confirmed) {
                                         logger.info({ txid: result.txid, profitUsdc: (profit / 1e6).toFixed(4) }, '✅ TRANSAÇÃO CONFIRMADA COM SUCESSO! LUCRO OBTIDO!');
                                         tradeLog.status = 'completed';
                                         await tradeLog.save();
+                                    } else {
+                                        // Se não confirmou nem falhou em 30s, o Jito dropou.
+                                        await FlashLoanTrade.deleteOne({ _id: tradeLog._id });
                                     }
                                 } catch (e: any) {
-                                    logger.warn({ txid: result.txid, error: e.message }, '⚠️ Timeout ou erro ao checar a confirmação da transação na rede.');
+                                    // Ignora erros silenciosamente para não poluir o log
                                 }
                             });
 
