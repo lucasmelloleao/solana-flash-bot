@@ -256,8 +256,11 @@ async function runSingleStrategyArbitrage(strategy: any) {
         const spreadPct = ((profit / BORROW_AMOUNT) * 100).toFixed(4);
         const minProfit = strategy.minProfitUsdc ?? 0;
         const outUsdc = (finalAmount / 1e6).toFixed(4);
-        const costUsdc = (totalExecutionCostMicroUsdc / 1e6).toFixed(4);
         const feeUsdc = (flashLoanFee / 1e6).toFixed(4);
+        
+        global.lastSpreadUsdc = spreadUsdc;
+        global.lastSpreadPct = spreadPct;
+        global.lastCheckedStrategy = strategy.name;
 
         // Log de "SEM OPORTUNIDADE" removido para limpar o terminal e liberar o Event Loop para atirar mais rápido
         if (profit >= (minProfit * 1e6)) {
@@ -675,3 +678,12 @@ async function startEngine() {
 }
 
 startEngine();
+
+// --- HEARTBEAT DO TERMINAL ---
+// Mostra ao usuário que o robô está vivo, atualizando apenas a mesma linha a cada 2 segundos 
+// para não gastar CPU nem travar o Event Loop.
+setInterval(() => {
+    if (activeTargetPools && activeTargetPools.length > 0 && (global as any).lastCheckedStrategy) {
+        process.stdout.write(`\r🤖 [Motor WSS] Furtividade Ativa. Escaneando ${activeTargetPools.length} pools. Última distorção [${(global as any).lastCheckedStrategy}]: $${(global as any).lastSpreadUsdc} (${(global as any).lastSpreadPct}%)       `);
+    }
+}, 2000);
