@@ -67,7 +67,7 @@ export class TransactionBuilder {
         const lutAddresses = [...new Set([...swapA.addressLookupTableAddresses, ...swapB.addressLookupTableAddresses])];
         const lookupTableAccounts = await SolanaService.resolveLookupTables(lutAddresses as string[]);
 
-        const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ units: 500000 });
+        const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ units: 1200000 });
         const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 40000 });
         const randomTipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
         const jitoTipIx = SystemProgram.transfer({ fromPubkey: walletKeypair.publicKey, toPubkey: randomTipAccount, lamports: jitoTipLamports });

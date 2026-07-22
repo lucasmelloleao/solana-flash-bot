@@ -246,7 +246,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
         if (useRaptor) finalAmount = Math.floor(finalAmount * 0.995);
 
         const jitoTipCostUsdc = (latestJitoTipLamports / 1e9) * cachedSolPriceUsdc;
-        const priorityFeeCostUsdc = ((500000 * 40000) / 1e15) * cachedSolPriceUsdc;
+        const priorityFeeCostUsdc = ((1200000 * 40000) / 1e15) * cachedSolPriceUsdc;
         const totalExecutionCostMicroUsdc = Math.ceil((jitoTipCostUsdc + priorityFeeCostUsdc) * 1e6);
 
         const profit = finalAmount - (BORROW_AMOUNT + flashLoanFee + totalExecutionCostMicroUsdc);
