@@ -65,8 +65,8 @@ export class QuoteService {
                 await redisClient.set(cacheKey, JSON.stringify(result), 'PX', 400); // 400ms cache para acompanhar as pools sem atraso
             }
             return result;
-        } catch (error) {
-            console.log('QuoteService: getQuotes error', error)
+        } catch (error: any) {
+            // console.log('QuoteService: getQuotes error', error)
             throw error;
         }
     }

@@ -376,10 +376,10 @@ async function runSingleStrategyArbitrage(strategy: any) {
                         }
                     }
                 } catch (txError: any) {
-                    if (txError.message && txError.message.includes('encoding overruns Uint8Array')) {
-                        logger.error('🚨 TRANSAÇÃO GIGANTE (> 1232 bytes) — ignorando oportunidade');
+                    if (txError.message && (txError.message.includes('encoding overruns Uint8Array') || txError.message.includes('TRANSACTION_TOO_LARGE'))) {
+                        // logger.error('🚨 TRANSAÇÃO GIGANTE (> 1232 bytes) — ignorando oportunidade');
                     } else {
-                        logger.error(`Erro na transação: ${txError.message}`);
+                        // logger.error(`Erro na transação: ${txError.message}`);
                     }
                 }
             }
@@ -406,7 +406,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
             }
             logger.warn(`Rate Limit 429 detectado no provider '${penalizedProvider}'. Penalidade de 15s aplicada (outros providers NÃO afetados).`);
         } else {
-            logger.error(`Erro ignorado durante a busca de cotações: ${err.message || err}`);
+            // logger.error(`Erro ignorado durante a busca de cotações: ${err.message || err}`);
         }
     } finally {
         // Libera o lock da estratégia — sempre executa, independente de sucesso ou erro
