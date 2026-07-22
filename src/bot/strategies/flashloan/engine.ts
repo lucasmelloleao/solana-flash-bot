@@ -23,17 +23,22 @@ let logger = {
 
 let botMode = 'simulated';
 let connectionMode = 'rpc';
-let isAnalyzing = false;
-let globalPenaltyMs = 0;
+let isAnalyzing = false; // Flag de ciclo global (evita ciclos de polling sobrepostos)
+let globalPenaltyMs = 0; // Penalidade global de último recurso (mantida para compatibilidade)
+// Penalidades por provider — evita bloquear Jupiter quando é o Raptor que tomou 429, e vice-versa
+const providerPenaltyUntil: Record<string, number> = { jupiter: 0, raptor: 0 };
 let lastExecutionTime = 0;
-// Throttle requests to Jupiter/Raptor: max ~1 per 800ms to avoid rate limits while being fast
-const MIN_INTERVAL_MS = 800;
+// Throttle requests to Jupiter/Raptor: max ~1 per 400ms para capturar mais blocos Solana (~400ms/block)
+const MIN_INTERVAL_MS = 400;
 
-let latestJitoTipLamports = 25000;
+let latestJitoTipLamports = 100000; // 100k lamports para competir em bundles Jito reais
 let cachedStrategies: any[] = [];
 let cachedSolPriceUsdc = 150;
 let userIdCache: string | null = null;
 const temporaryAttempts = new Map<string, number>();
+const strategyAnalyzingMap = new Map<string, boolean>(); // Lock por estratégia — evita execução concorrente da mesma
+const simulatedTradeLastSaved = new Map<string, number>(); // Rate limit: evita poluição do DB em modo simulado
+const SIMULATED_SAVE_INTERVAL_MS = 5 * 60 * 1000; // Máx 1 trade simulado salvo por estratégia a cada 5 min
 
 let walletCache: Map<string, { keypair: Keypair, usdcAta: PublicKey, balance: number }> = new Map();
 
@@ -74,7 +79,7 @@ const lastStrategyRunTimes = new Map<string, number>();
 let activeTargetPools: { address: PublicKey; mintA: string; mintB: string }[] = [];
 let targetPoolSubscriptionIds: number[] = [];
 const lastKnownPoolStates = new Map<string, string>();
-const FAST_POLL_INTERVAL_MS = 200;
+const FAST_POLL_INTERVAL_MS = 400; // Alinhado com MIN_INTERVAL_MS — evita gasto excessivo de RPC quota
 
 async function resubscribePoolAccounts() {
     if (targetPoolSubscriptionIds.length > 0) {
@@ -174,16 +179,22 @@ async function reloadState() {
 }
 
 async function runSingleStrategyArbitrage(strategy: any) {
+    const stratId = strategy._id.toString();
+
+    // Lock por estratégia: evita execução concorrente da mesma estratégia em ciclos sobrepostos
+    if (strategyAnalyzingMap.get(stratId)) return;
+    strategyAnalyzingMap.set(stratId, true);
+
     try {
         if (strategy.temporary) {
-            const attempts = temporaryAttempts.get(strategy._id.toString()) || 0;
+            const attempts = temporaryAttempts.get(stratId) || 0;
             if (attempts >= 10) {
-                await DatabaseService.deleteStrategy(strategy._id.toString());
-                temporaryAttempts.delete(strategy._id.toString());
-                cachedStrategies = cachedStrategies.filter(s => s._id.toString() !== strategy._id.toString());
+                await DatabaseService.deleteStrategy(stratId);
+                temporaryAttempts.delete(stratId);
+                cachedStrategies = cachedStrategies.filter(s => s._id.toString() !== stratId);
                 return;
             }
-            temporaryAttempts.set(strategy._id.toString(), attempts + 1);
+            temporaryAttempts.set(stratId, attempts + 1);
         }
 
         const tokenBorrowed = strategy.tokenAMint || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Defaults to USDC
@@ -198,9 +209,16 @@ async function runSingleStrategyArbitrage(strategy: any) {
 
         const BORROW_AMOUNT = Math.floor(strategy.borrowAmount * 1e6);
         const useRaptor = strategy.provider === 'raptor';
+        const providerKey = useRaptor ? 'raptor' : 'jupiter';
+
+        // Penalidade por provider: um 429 do Raptor não bloqueia estratégias que usam Jupiter
+        if (providerPenaltyUntil[providerKey] > Date.now()) return;
 
         const quotes = await QuoteService.getQuotes(strategy.tokenBMint, BORROW_AMOUNT, useRaptor);
-        if (!quotes) return;
+        if (!quotes) {
+            logger.warn({ strategy: strategy.name }, '⚠️ DIAGNÓSTICO: Quotes retornaram null — verifique o tokenBMint e conectividade com Jupiter/Raptor.');
+            return;
+        }
 
         const { quoteA, quoteB } = quotes;
         const flashLoanFee = lendingProvider === 'none' ? 0 : Math.ceil((BORROW_AMOUNT * 9) / 10000); // 0.09% para Solend/Kamino, 0 no capital próprio
@@ -214,10 +232,34 @@ async function runSingleStrategyArbitrage(strategy: any) {
 
         const profit = finalAmount - (BORROW_AMOUNT + flashLoanFee + totalExecutionCostMicroUsdc);
 
-        if (profit >= (strategy.minProfitUsdc * 1e6)) {
+        // --- LOG DE DIAGNÓSTICO: mostra spread em CADA ciclo, mesmo sem oportunidade ---
+        const spreadUsdc = (profit / 1e6).toFixed(4);
+        const spreadPct = ((profit / BORROW_AMOUNT) * 100).toFixed(4);
+        const minProfit = strategy.minProfitUsdc ?? 0;
+        const outUsdc = (finalAmount / 1e6).toFixed(4);
+        const costUsdc = (totalExecutionCostMicroUsdc / 1e6).toFixed(4);
+        const feeUsdc = (flashLoanFee / 1e6).toFixed(4);
+
+        if (profit < (minProfit * 1e6)) {
+            process.stdout.write(
+                `\r📊 [${strategy.name}] entrada=$${(BORROW_AMOUNT/1e6).toFixed(2)} saída=$${outUsdc} | lucro=$${spreadUsdc} (${spreadPct}%) | fee=$${feeUsdc} custo=$${costUsdc} | minProfit=$${minProfit} ❌ SEM OPORTUNIDADE | ${new Date().toLocaleTimeString()} `
+            );
+        }
+
+        if (profit >= (minProfit * 1e6)) {
             logger.info({ profitUsdc: (profit / 1e6).toFixed(4) }, '💰 OPORTUNIDADE DETECTADA');
 
             if (botMode === 'live' && !circuitBreaker.check()) return;
+
+            // Rate limit para registros simulados — evita centenas de trades/hora poluindo o banco de dados
+            if (botMode !== 'live') {
+                const lastSaved = simulatedTradeLastSaved.get(stratId) || 0;
+                if (Date.now() - lastSaved < SIMULATED_SAVE_INTERVAL_MS) {
+                    logger.info({ profitUsdc: (profit / 1e6).toFixed(4) }, '💰 OPORTUNIDADE SIMULADA (rate-limited — aguardando janela de 5min para salvar no DB)');
+                    return;
+                }
+                simulatedTradeLastSaved.set(stratId, Date.now());
+            }
 
             const tradeLog = await FlashLoanTrade.create({
                 userId: strategy.userId,
@@ -304,19 +346,24 @@ async function runSingleStrategyArbitrage(strategy: any) {
         
         if (strategy.temporary && (status === 400 || status === 429)) {
             logger.warn(`Erro ${status} detectado na estratégia temporária ${strategy.name}. A estratégia será eliminada prematuramente.`);
-            await DatabaseService.deleteStrategy(strategy._id.toString());
-            temporaryAttempts.delete(strategy._id.toString());
-            cachedStrategies = cachedStrategies.filter(s => s._id.toString() !== strategy._id.toString());
+            await DatabaseService.deleteStrategy(stratId);
+            temporaryAttempts.delete(stratId);
+            cachedStrategies = cachedStrategies.filter(s => s._id.toString() !== stratId);
         }
 
         if (err.message && err.message.includes('Solend Pool configuration not found')) {
             logger.error(`Erro de Configuração de Pool: ${err.message}`);
         } else if (status === 429) {
-            globalPenaltyMs = Date.now() + 15000;
-            logger.warn('Rate Limit 429 detectado. Penalidade de 15s aplicada.');
+            // Penalidade por provider específico — não afeta o provider alternativo
+            const penalizedProvider = strategy.provider === 'raptor' ? 'raptor' : 'jupiter';
+            providerPenaltyUntil[penalizedProvider] = Date.now() + 15000;
+            logger.warn(`Rate Limit 429 detectado no provider '${penalizedProvider}'. Penalidade de 15s aplicada (outros providers NÃO afetados).`);
         } else {
             logger.error(`Erro ignorado durante a busca de cotações: ${err.message || err}`);
         }
+    } finally {
+        // Libera o lock da estratégia — sempre executa, independente de sucesso ou erro
+        strategyAnalyzingMap.set(stratId, false);
     }
 }
 
@@ -557,6 +604,15 @@ async function startEngine() {
                 console.error('Erro no poller de preços:', err);
             }
         }, 15000);
+
+        // Poller de Transações Pendentes (30 segundos) — resolve trades com status 'pending' que ficaram sem confirmação
+        setInterval(async () => {
+            try {
+                await checkPendingTransactions();
+            } catch (err) {
+                console.error('Erro no poller de transações pendentes:', err);
+            }
+        }, 30000);
 
         await restartExecutionEngine();
 

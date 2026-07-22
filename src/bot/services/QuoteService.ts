@@ -23,16 +23,16 @@ export class QuoteService {
 
         try {
             if (useRaptor) {
-                const quoteARes = await raptorApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=2&onlyDirectRoutes=true`);
+                const quoteARes = await raptorApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=50`);
                 quoteA = quoteARes.data;
                 if (!quoteA || !quoteA.amountOut) return null;
-                const quoteBRes = await raptorApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.amountOut}&slippageBps=2&onlyDirectRoutes=true`);
+                const quoteBRes = await raptorApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.amountOut}&slippageBps=50`);
                 quoteB = quoteBRes.data;
             } else {
-                const quoteARes = await jupApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=2&onlyDirectRoutes=true`);
+                const quoteARes = await jupApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=50`);
                 quoteA = quoteARes.data;
                 if (!quoteA) return null;
-                const quoteBRes = await jupApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.outAmount}&slippageBps=2&onlyDirectRoutes=true`);
+                const quoteBRes = await jupApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.outAmount}&slippageBps=50`);
                 quoteB = quoteBRes.data;
             }
             if (!quoteB) return null;

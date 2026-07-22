@@ -4,7 +4,7 @@ import { flashBorrowReserveLiquidity, flashRepayReserveLiquidity } from '@kamino
 import { KaminoPoolConfig } from '../../config/kamino-pools';
 
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-const KAMINO_PROGRAM_ID = new PublicKey('KLend2g3cPENfacJ9vnAtxXFQr1djYSU33M2hQ7D2A8');
+const KAMINO_PROGRAM_ID = new PublicKey('KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD'); // ID verificado via docs oficiais Kamino
 
 export function createKaminoFlashLoanBorrowInstruction(liquidityAmount: number, userAta: PublicKey, poolConfig: KaminoPoolConfig): TransactionInstruction {
     const amountBN = new BN(liquidityAmount);
