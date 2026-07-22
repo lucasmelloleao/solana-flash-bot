@@ -259,12 +259,7 @@ async function runSingleStrategyArbitrage(strategy: any) {
         const costUsdc = (totalExecutionCostMicroUsdc / 1e6).toFixed(4);
         const feeUsdc = (flashLoanFee / 1e6).toFixed(4);
 
-        if (profit < (minProfit * 1e6)) {
-            process.stdout.write(
-                `\r📊 [${strategy.name}] entrada=$${(BORROW_AMOUNT/1e6).toFixed(2)} saída=$${outUsdc} | lucro=$${spreadUsdc} (${spreadPct}%) | fee=$${feeUsdc} custo=$${costUsdc} | minProfit=$${minProfit} ❌ SEM OPORTUNIDADE | ${new Date().toLocaleTimeString()} `
-            );
-        }
-
+        // Log de "SEM OPORTUNIDADE" removido para limpar o terminal e liberar o Event Loop para atirar mais rápido
         if (profit >= (minProfit * 1e6)) {
             logger.info({ profitUsdc: (profit / 1e6).toFixed(4) }, '💰 OPORTUNIDADE DETECTADA');
 
@@ -426,7 +421,7 @@ async function runArbitrageCycle() {
 
     isAnalyzing = true;
     try {
-        process.stdout.write(`\r⚡ Analisando ${cachedStrategies.length} estratégia(s) via ciclo geral... | ${new Date().toLocaleTimeString()} `);
+        // process.stdout.write(`\r⚡ Analisando ${cachedStrategies.length} estratégia(s) via ciclo geral... | ${new Date().toLocaleTimeString()} `);
         await Promise.all(cachedStrategies.map(async (strategy) => {
             await runSingleStrategyArbitrage(strategy);
         }));
@@ -451,7 +446,7 @@ async function triggerTargetedArbitrageCycle(mintA: string, mintB: string) {
 
         if (matchingStrategies.length === 0) return;
 
-        process.stdout.write(`\r⚡ Mudança em Pool detectada. Analisando ${matchingStrategies.length} estratégia(s)... | ${new Date().toLocaleTimeString()} `);
+        // process.stdout.write(`\r⚡ Mudança em Pool detectada. Analisando ${matchingStrategies.length} estratégia(s)... | ${new Date().toLocaleTimeString()} `);
         await Promise.all(matchingStrategies.map(async (strategy) => {
             await runSingleStrategyArbitrage(strategy);
         }));
@@ -500,7 +495,7 @@ async function pollTargetPoolAccounts() {
 
             isAnalyzing = true;
             try {
-                process.stdout.write(`\r⚡ Mudança detectada via polling. Analisando ${cachedStrategies.length} estratégia(s)... | ${new Date().toLocaleTimeString()} `);
+                // process.stdout.write(`\r⚡ Mudança detectada via polling. Analisando ${cachedStrategies.length} estratégia(s)... | ${new Date().toLocaleTimeString()} `);
                 await Promise.all(cachedStrategies.map(async (strategy) => {
                     const tokenA = strategy.tokenAMint || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
                     const tokenB = strategy.tokenBMint;
