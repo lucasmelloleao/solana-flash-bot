@@ -52,10 +52,10 @@ export class QuoteService {
                 const quoteBRes = await raptorApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.amountOut}&slippageBps=50&maxAccounts=28`);
                 quoteB = quoteBRes.data;
             } else {
-                const quoteARes = await jupApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=50&maxAccounts=28`);
+                const quoteARes = await jupApi.get(`/quote?inputMint=${USDC_MINT}&outputMint=${tokenMint}&amount=${borrowAmount}&slippageBps=50`);
                 quoteA = quoteARes.data;
                 if (!quoteA) return null;
-                const quoteBRes = await jupApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.outAmount}&slippageBps=50&maxAccounts=28`);
+                const quoteBRes = await jupApi.get(`/quote?inputMint=${tokenMint}&outputMint=${USDC_MINT}&amount=${quoteA.outAmount}&slippageBps=50`);
                 quoteB = quoteBRes.data;
             }
             if (!quoteB) return null;

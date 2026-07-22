@@ -427,7 +427,7 @@ async function runArbitrageCycle() {
         }));
     } finally {
         isAnalyzing = false;
-        process.stdout.write(` | Levou: ${Date.now() - now}ms`);
+        // process.stdout.write(` | Levou: ${Date.now() - now}ms`);
     }
 }
 
@@ -452,7 +452,7 @@ async function triggerTargetedArbitrageCycle(mintA: string, mintB: string) {
         }));
     } finally {
         isAnalyzing = false;
-        process.stdout.write(` | Levou: ${Date.now() - now}ms`);
+        // process.stdout.write(` | Levou: ${Date.now() - now}ms`);
     }
 }
 
@@ -516,7 +516,7 @@ async function pollTargetPoolAccounts() {
                 }));
             } finally {
                 isAnalyzing = false;
-                process.stdout.write(` | Levou: ${Date.now() - now}ms`);
+                // process.stdout.write(` | Levou: ${Date.now() - now}ms`);
             }
         }
     } catch (error) {
