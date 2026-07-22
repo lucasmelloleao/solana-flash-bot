@@ -14,14 +14,14 @@ import { createKaminoFlashLoanBorrowInstruction, createKaminoFlashLoanRepayInstr
 import { SolanaService } from './SolanaService';
 
 const JITO_TIP_ACCOUNTS = [
-    '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+    'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
     'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
-    'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvVkY',
+    'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
+    '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
     'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
-    'DfXygSm4jMoQAqhSqSyCWEHjoEQq8WkK3WNDPWh9F8p8',
-    'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwLcWE',
-    'DttWaMuVvTiduZZ1vWHcNEvzePpfndZ5XQ7hG2k2Q5T2',
-    '3AVi9Tg9Uo68tJfuvoKvYEGcGXH227G43FhX9p98iP3C'
+    '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+    'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+    'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh'
 ];
 
 function deserializeInstruction(instruction: any) {
@@ -150,6 +150,25 @@ export class TransactionBuilder {
 
 
         const jitoResponse = await SolanaService.sendJitoBundle(transactionBase58);
+        
+        // Simulação assíncrona para o usuário ver O MOTIVO da transação ser dropada
+        SolanaService.getWriteConnection().then(async (conn) => {
+            try {
+                const simRes = await conn.simulateTransaction(transaction);
+                if (simRes.value.err) {
+                    console.log(`\n[DEBUG] 🔍 MOTIVO DO DROP (Simulação Falhou):`);
+                    console.log(JSON.stringify(simRes.value.err));
+                    if (simRes.value.logs) {
+                        const importantLogs = simRes.value.logs.filter(l => l.toLowerCase().includes('error') || l.toLowerCase().includes('fail') || l.toLowerCase().includes('insufficient') || l.toLowerCase().includes('slippage') || l.toLowerCase().includes('exceeded'));
+                        console.log(`Logs Relevantes:`, importantLogs.length > 0 ? importantLogs : simRes.value.logs.slice(-5));
+                    }
+                    console.log(`\n`);
+                } else {
+                    console.log(`\n[DEBUG] 🔍 Simulação local passou com sucesso! Se não apareceu no Solscan, você perdeu o leilão do Jito para outro robô.\n`);
+                }
+            } catch (e) {}
+        });
+
         return {
             txid,
             jitoBundleId: (jitoResponse && jitoResponse.result) ? jitoResponse.result : null,
