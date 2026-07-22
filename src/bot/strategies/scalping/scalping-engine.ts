@@ -243,8 +243,8 @@ async function getOrCreateExchangeInstance(exchangeKeyDoc: any) {
     if ((ccxt as any).pro[ccxtExchangeId]) {
         const ExchangeClass = (ccxt as any).pro[ccxtExchangeId] as any;
         const instance = new ExchangeClass({
-            apiKey: apiKey,
-            secret: decryptedSecret,
+            apiKey: apiKey.trim(),
+            secret: decryptedSecret.trim(),
             enableRateLimit: false, // DESLIGADO PARA HFT: A trava padrão do CCXT estava enfileirando as ordens e gerando delay de 3 segundos
             options: {
                 adjustForTimeDifference: true,

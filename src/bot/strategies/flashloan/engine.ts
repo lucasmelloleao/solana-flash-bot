@@ -372,7 +372,12 @@ async function runSingleStrategyArbitrage(strategy: any) {
                         } else {
                             await FlashLoanTrade.deleteOne({ _id: tradeLog._id });
                             circuitBreaker.recordFailure();
-                            logger.error({ txid: result.txid, jitoResponse: result.fullJitoResponse }, '❌ JITO REJEITOU O BUNDLE (Falha ao enviar)');
+                            const jitoErrString = JSON.stringify(result.fullJitoResponse || {});
+                            if (jitoErrString.includes('bundles cannot lock any vote accounts')) {
+                                // logger.warn('⚠️ Jito recusou pacote (envolve conta de votação/stake). Ignorando silenciosamente.');
+                            } else {
+                                logger.error({ txid: result.txid, jitoResponse: result.fullJitoResponse }, '❌ JITO REJEITOU O BUNDLE (Falha ao enviar)');
+                            }
                         }
                     }
                 } catch (txError: any) {
