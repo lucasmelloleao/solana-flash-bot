@@ -3,9 +3,17 @@ import https from 'https';
 import redisClient from './RedisService';
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 10, scheduling: 'fifo' });
-const jupApiUrl = process.env.JUPITER_URL || 'https://quote-api.jup.ag/v6';
+const jupApiUrl = process.env.JUPITER_URL || 'https://api.jup.ag/swap/v1';
+const jupApiKey = process.env.JUPITER_API_KEY;
 console.log(`🪐 [QuoteService] Roteador Jupiter configurado para: ${jupApiUrl}`);
-const jupApi = axios.create({ baseURL: jupApiUrl, httpsAgent, timeout: 3000 });
+
+const headers: any = {};
+if (jupApiKey) {
+    headers['x-api-key'] = jupApiKey;
+    console.log(`🔑 [QuoteService] Autenticação Jupiter (API Key) ATIVADA!`);
+}
+
+const jupApi = axios.create({ baseURL: jupApiUrl, httpsAgent, timeout: 3000, headers });
 const raptorApi = axios.create({ baseURL: 'https://raptor-beta.solanatracker.io', httpsAgent, timeout: 2000 });
 
 export class QuoteService {
@@ -54,7 +62,7 @@ export class QuoteService {
 
             const result = { quoteA, quoteB };
             if (redisClient) {
-                await redisClient.set(cacheKey, JSON.stringify(result), 'PX', 500); // 500ms cache para evitar bombardear a API
+                await redisClient.set(cacheKey, JSON.stringify(result), 'PX', 400); // 400ms cache para acompanhar as pools sem atraso
             }
             return result;
         } catch (error) {

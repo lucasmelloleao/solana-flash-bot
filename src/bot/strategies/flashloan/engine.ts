@@ -181,6 +181,14 @@ async function reloadState() {
 
 async function runSingleStrategyArbitrage(strategy: any) {
     const stratId = strategy._id.toString();
+    const now = Date.now();
+
+    // Throttle (Limitador): Impede que a MESMA estratégia ative mais de 1 vez por segundo, 
+    // mesmo que haja dezenas de eventos WSS naquele segundo.
+    // Assim que der 1 segundo, o próximo WSS acionará imediatamente (latência zero).
+    const lastRun = lastStrategyRunTimes.get(stratId) || 0;
+    if (now - lastRun < 1000) return; // 1000ms = 1 requisição por estratégia por segundo.
+    lastStrategyRunTimes.set(stratId, now);
 
     // Lock por estratégia: evita execução concorrente da mesma estratégia em ciclos sobrepostos
     if (redisClient) {
